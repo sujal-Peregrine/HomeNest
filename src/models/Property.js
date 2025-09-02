@@ -10,6 +10,7 @@ const PropertySchema = new Schema({
   name: { type: String, required: true },
   address: Address,
   floors: { type: Number, default: 1 },
+  units: { type: Number, required: true, min: 1 },
 }, { timestamps: true });
 
 export default model("properties", PropertySchema);
