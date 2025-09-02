@@ -14,8 +14,19 @@ await app.register(jwt, { secret: process.env.JWT_SECRET || "devsecret" });
 
 // DB
 const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017/landlord_app";
-await mongoose.connect(MONGO_URI);
 
+try {
+  await mongoose.connect(MONGO_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+    tls: true,
+    tlsAllowInvalidCertificates: false,
+  });
+  app.log.info("✅ Connected to MongoDB");
+} catch (err) {
+  app.log.error("❌ MongoDB connection failed:", err);
+  process.exit(1);
+}
 // Auth decorator
 app.decorate("auth", async (req, reply) => {
   try { await req.jwtVerify(); }
