@@ -1,0 +1,289 @@
+{
+  "info": {
+    "name": "Landlord App API - Full",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000"
+    },
+    {
+      "key": "token",
+      "value": ""
+    },
+    {
+      "key": "year",
+      "value": "2025"
+    },
+    {
+      "key": "month",
+      "value": "9"
+    },
+    {
+      "key": "periodId",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Auth - Signup",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/auth/signup",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "auth",
+            "signup"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\"email\": \"owner1@example.com\", \"password\": \"password123\", \"name\": \"Owner One\"}"
+        }
+      }
+    },
+    {
+      "name": "Auth - Login (owner1)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/auth/login",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "auth",
+            "login"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\"email\": \"owner1@example.com\", \"password\": \"password123\"}"
+        }
+      }
+    },
+    {
+      "name": "Dashboard (current month)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/dashboard",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "dashboard"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Generate Rent Periods (year & month)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/billing/generate?year={{year}}&month={{month}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "billing",
+            "generate"
+          ],
+          "query": [
+            {
+              "key": "year",
+              "value": "{{year}}"
+            },
+            {
+              "key": "month",
+              "value": "{{month}}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "List Properties",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/properties",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "properties"
+          ]
+        }
+      }
+    },
+    {
+      "name": "List Units",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/units",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "units"
+          ]
+        }
+      }
+    },
+    {
+      "name": "List Tenants",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/tenants",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "tenants"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Create Lease",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/leases",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "leases"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\"tenantId\": \"<tenantId>\", \"unitId\": \"<unitId>\", \"propertyId\": \"<propertyId>\", \"startDate\": \"2025-09-01T00:00:00.000Z\", \"monthlyRent\": 12000, \"dueDay\": 5}"
+        }
+      }
+    },
+    {
+      "name": "List Rent Periods",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/rent-periods?year={{year}}&month={{month}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "rent-periods"
+          ],
+          "query": [
+            {
+              "key": "year",
+              "value": "{{year}}"
+            },
+            {
+              "key": "month",
+              "value": "{{month}}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Pay a Period",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/rent-periods/{{periodId}}/payments",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "rent-periods",
+            "{{periodId}}",
+            "payments"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\"amount\": 12000, \"method\": \"upi\", \"reference\": \"UTR123\"}"
+        }
+      }
+    }
+  ]
+}
