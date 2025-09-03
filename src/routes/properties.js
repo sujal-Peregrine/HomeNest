@@ -34,9 +34,16 @@ export default async function routes(app) {
         data: property,
       });
     } catch (err) {
+      if (err.issues) {
+        const messages = err.issues.map(e => e.message);
+        return reply.code(400).send({
+          success: false,
+          message: messages.join(", "),
+        });
+      }
       return reply.code(400).send({
         success: false,
-        message: err.errors ? err.errors[0].message : err.message,
+        message: err.message,
       });
     }
   });
@@ -112,9 +119,16 @@ export default async function routes(app) {
         data: property,
       });
     } catch (err) {
+      if (err.issues) {
+        const messages = err.issues.map(e => e.message);
+        return reply.code(400).send({
+          success: false,
+          message: messages.join(", "),
+        });
+      }
       return reply.code(400).send({
         success: false,
-        message: err.errors ? err.errors[0].message : err.message,
+        message: err.message,
       });
     }
   });
