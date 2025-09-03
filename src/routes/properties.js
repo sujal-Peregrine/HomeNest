@@ -2,7 +2,7 @@ import { z } from "zod";
 import Property from "../models/Property.js";
 
 const propertySchema = z.object({
-  name: z.string().min(1),
+  name: z.string({ required_error: "Property name is required" }).min(1, "Property name cannot be empty"),
   address: z.object({
     line1: z.string().optional(),
     line2: z.string().optional(),
@@ -11,8 +11,10 @@ const propertySchema = z.object({
     zip: z.string().optional(),
     country: z.string().optional(),
   }).optional(),
-  floors: z.number().int().min(1),
-  units: z.number().int().min(1),
+  floors: z.number({
+    required_error: "Number of floors is required",
+    invalid_type_error: "Floors must be a number",
+  }).int("Floors must be an integer").min(1, "Floors must be at least 1"),
 });
 
 export default async function routes(app) {
