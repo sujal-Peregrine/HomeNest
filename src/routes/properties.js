@@ -1,5 +1,9 @@
 import { z } from "zod";
 import Property from "../models/Property.js";
+import Floor from "../models/Floor.js";
+import Unit from "../models/Unit.js";
+import Tenant from "../models/Tenant.js";
+import mongoose from "mongoose";
 
 const propertySchema = z.object({
   name: z.string({ required_error: "Property name is required" }).min(1, "Property name cannot be empty"),
@@ -16,18 +20,43 @@ const propertySchema = z.object({
     invalid_type_error: "Floors must be a number",
   }).int("Floors must be an integer").min(1, "Floors must be at least 1"),
 });
-
+// Update schema without floors to prevent changing floor count
+const updateSchema = propertySchema.omit({ floors: true }).partial();
+function floorName(i) {
+  if (i === 0) return "Ground Floor";
+  if (i === 1) return "1st Floor";
+  if (i === 2) return "2nd Floor";
+  if (i === 3) return "3rd Floor";
+  return `${i}th Floor`;
+}
 export default async function routes(app) {
   app.addHook("preHandler", app.auth);
-
   // ✅ Create Property
   app.post("/", async (req, reply) => {
     try {
       const body = propertySchema.parse(req.body);
       const landlordId = req.user.sub;
-
+      // check duplicate name
+      const exists = await Property.findOne({ landlordId, name: body.name });
+      if (exists) {
+        return reply.code(409).send({
+          success: false,
+          message: "Property name already exists.",
+        });
+      }
+      // create property
       const property = await Property.create({ ...body, landlordId });
-
+      // create floors automatically
+      const floors = [];
+      for (let i = 0; i < body.floors; i++) {
+        floors.push({
+          landlordId,
+          propertyId: property._id,
+          floorNumber: i,
+          name: floorName(i),
+        });
+      }
+      await Floor.insertMany(floors);
       return reply.code(201).send({
         success: true,
         message: "Property created successfully",
@@ -36,24 +65,16 @@ export default async function routes(app) {
     } catch (err) {
       if (err.issues) {
         const messages = err.issues.map(e => e.message);
-        return reply.code(400).send({
-          success: false,
-          message: messages.join(", "),
-        });
+        return reply.code(400).send({ success: false, message: messages.join(", ") });
       }
-      return reply.code(400).send({
-        success: false,
-        message: err.message,
-      });
+      return reply.code(400).send({ success: false, message: err.message });
     }
   });
-
   // ✅ List Properties
   app.get("/", async (req, reply) => {
     try {
       const landlordId = req.user.sub;
       const properties = await Property.find({ landlordId }).sort({ createdAt: -1 });
-
       return reply.send({
         success: true,
         count: properties.length,
@@ -67,20 +88,17 @@ export default async function routes(app) {
       });
     }
   });
-
   // ✅ Get Single Property
   app.get("/:id", async (req, reply) => {
     try {
       const landlordId = req.user.sub;
       const property = await Property.findOne({ _id: req.params.id, landlordId });
-
       if (!property) {
         return reply.code(404).send({
           success: false,
           message: "Property not found",
         });
       }
-
       return reply.send({
         success: true,
         data: property,
@@ -93,26 +111,22 @@ export default async function routes(app) {
       });
     }
   });
-
   // ✅ Update Property
   app.put("/:id", async (req, reply) => {
     try {
       const landlordId = req.user.sub;
-      const body = propertySchema.partial().parse(req.body);
-
+      const body = updateSchema.parse(req.body);
       const property = await Property.findOneAndUpdate(
         { _id: req.params.id, landlordId },
         { $set: body },
         { new: true }
       );
-
       if (!property) {
         return reply.code(404).send({
           success: false,
           message: "Property not found",
         });
       }
-
       return reply.send({
         success: true,
         message: "Property updated successfully",
@@ -132,23 +146,32 @@ export default async function routes(app) {
       });
     }
   });
-
   // ✅ Delete Property
   app.delete("/:id", async (req, reply) => {
     try {
       const landlordId = req.user.sub;
+      const propertyId = req.params.id;
+      // Check if any occupied units
+      const occupiedCount = await Unit.countDocuments({ propertyId, landlordId, status: "occupied" });
+      if (occupiedCount > 0) {
+        return reply.code(400).send({
+          success: false,
+          message: "Cannot delete property with occupied units. Evict all tenants first.",
+        });
+      }
       const property = await Property.findOneAndDelete({
-        _id: req.params.id,
+        _id: propertyId,
         landlordId,
       });
-
       if (!property) {
         return reply.code(404).send({
           success: false,
           message: "Property not found",
         });
       }
-
+      // Cascade delete floors and units (tenants should be none since no occupied)
+      await Floor.deleteMany({ propertyId, landlordId });
+      await Unit.deleteMany({ propertyId, landlordId });
       return reply.send({
         success: true,
         message: "Property deleted successfully",
@@ -159,6 +182,32 @@ export default async function routes(app) {
         message: "Invalid property ID",
         error: err.message,
       });
+    }
+  });
+  // ✅ Get Property Details with Floors, Units, and Tenants
+  app.get("/details/:id", async (req, reply) => {
+    try {
+      const landlordId = req.user.sub;
+      const propertyId = req.params.id;
+      const property = await Property.findOne({ _id: propertyId, landlordId });
+      if (!property) {
+        return reply.code(404).send({ success: false, message: "Property not found" });
+      }
+      const floors = await Floor.find({ propertyId, landlordId }).sort({ floorNumber: 1 });
+      const units = await Unit.find({ propertyId, landlordId }).sort({ floorId: 1, unitLabel: 1 });
+      const unitIds = units.map(u => u._id);
+      const tenants = await Tenant.find({ unitId: { $in: unitIds }, landlordId });
+      const tenantMap = Object.fromEntries(tenants.map(t => [t.unitId.toString(), t.toObject()]));
+      const floorData = floors.map(f => ({
+        ...f.toObject(),
+        units: units.filter(u => u.floorId.toString() === f._id.toString()).map(u => ({
+          ...u.toObject(),
+          tenant: tenantMap[u._id.toString()] || null,
+        })),
+      }));
+      return reply.send({ success: true, property, floors: floorData });
+    } catch (err) {
+      return reply.code(500).send({ success: false, message: err.message });
     }
   });
 }

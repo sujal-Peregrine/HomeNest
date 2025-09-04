@@ -43,6 +43,7 @@ import billingRoutes from "./routes/billing.js";
 import rentPeriodRoutes from "./routes/rentPeriods.js";
 import paymentRoutes from "./routes/payments.js";
 import dashboardRoutes from "./routes/dashboard.js";
+import floorRoutes from "./routes/floors.js";
 
 app.register(authRoutes, { prefix: "/auth" });
 app.register(propertyRoutes, { prefix: "/properties" });
@@ -53,6 +54,8 @@ app.register(billingRoutes, { prefix: "/billing" });
 app.register(rentPeriodRoutes, { prefix: "/rent-periods" });
 app.register(paymentRoutes, { prefix: "/rent-periods" }); // nested payments
 app.register(dashboardRoutes, { prefix: "/dashboard" });
+app.register(floorRoutes , {prefix: "/floors"})
+
 
 app.get("/", async () => ({ ok: true }));
 
