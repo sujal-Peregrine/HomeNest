@@ -2,6 +2,7 @@ import { z } from "zod";
 import Floor from "../models/Floor.js";
 import Property from "../models/Property.js";
 import Unit from "../models/Unit.js";
+import Tenant from "../models/Tenant.js"; // Added Tenant import
 import mongoose from "mongoose";
 
 const createFloorSchema = z.object({
