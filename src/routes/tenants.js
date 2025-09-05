@@ -51,6 +51,31 @@ async function updateFloorCounts(propertyId, floorId, landlordId) {
   );
 }
 
+async function updatePropertyUnitCount(propertyId, landlordId) {
+  const agg = await Unit.aggregate([
+    { $match: { propertyId: new mongoose.Types.ObjectId(propertyId), landlordId: new mongoose.Types.ObjectId(landlordId) } },
+    {
+      $group: {
+        _id: null,
+        totalUnits: { $sum: 1 },
+        totalVacant: { $sum: { $cond: [{ $eq: ["$status", "vacant"] }, 1, 0] } },
+        totalOccupied: { $sum: { $cond: [{ $eq: ["$status", "occupied"] }, 1, 0] } },
+      }
+    }
+  ]);
+  const counts = agg[0] || { totalUnits: 0, totalVacant: 0, totalOccupied: 0 };
+  await Property.findOneAndUpdate(
+    { _id: new mongoose.Types.ObjectId(propertyId), landlordId: new mongoose.Types.ObjectId(landlordId) },
+    {
+      $set: {
+        totalUnits: counts.totalUnits,
+        totalVacant: counts.totalVacant,
+        totalOccupied: counts.totalOccupied
+      }
+    }
+  );
+}
+
 export default async function routes(app) {
   app.addHook("preHandler", app.auth);
   // ✅ Create Tenant
@@ -116,6 +141,7 @@ export default async function routes(app) {
 
       if (floorId) {
         await updateFloorCounts(body.propertyId, floorId, landlordId);
+        await updatePropertyUnitCount(body.propertyId, landlordId); // Update property counts
       }
 
       return reply.code(201).send({
@@ -208,6 +234,9 @@ export default async function routes(app) {
       if (newFloorId) {
         await updateFloorCounts(tenant.propertyId, newFloorId, landlordId);
       }
+      if (oldFloorId || newFloorId) {
+        await updatePropertyUnitCount(tenant.propertyId, landlordId); // Update property counts
+      }
 
       return reply.send({ success: true, message: "Tenant updated successfully", tenant: populatedTenant });
     } catch (err) {
@@ -230,6 +259,7 @@ export default async function routes(app) {
           unit.status = "vacant";
           await unit.save();
           await updateFloorCounts(tenant.propertyId, unit.floorId, landlordId);
+          await updatePropertyUnitCount(tenant.propertyId, landlordId); // Update property counts
         }
       }
 

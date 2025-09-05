@@ -10,6 +10,9 @@ const PropertySchema = new Schema({
   name: { type: String, required: true },
   address: Address,
   floors: { type: Number, default: 1 },
+  totalUnits: { type: Number, default: 0 },
+  totalOccupied: { type: Number, default: 0 },
+  totalVacant: { type: Number, default: 0 }, 
 }, { timestamps: true });
 
 export default model("properties", PropertySchema);

@@ -52,6 +52,31 @@ async function updateFloorCounts(propertyId, floorId, landlordId) {
   );
 }
 
+async function updatePropertyUnitCount(propertyId, landlordId) {
+  const agg = await Unit.aggregate([
+    { $match: { propertyId: new mongoose.Types.ObjectId(propertyId), landlordId: new mongoose.Types.ObjectId(landlordId) } },
+    {
+      $group: {
+        _id: null,
+        totalUnits: { $sum: 1 },
+        totalVacant: { $sum: { $cond: [{ $eq: ["$status", "vacant"] }, 1, 0] } },
+        totalOccupied: { $sum: { $cond: [{ $eq: ["$status", "occupied"] }, 1, 0] } },
+      }
+    }
+  ]);
+  const counts = agg[0] || { totalUnits: 0, totalVacant: 0, totalOccupied: 0 };
+  await Property.findOneAndUpdate(
+    { _id: new mongoose.Types.ObjectId(propertyId), landlordId: new mongoose.Types.ObjectId(landlordId) },
+    {
+      $set: {
+        totalUnits: counts.totalUnits,
+        totalVacant: counts.totalVacant,
+        totalOccupied: counts.totalOccupied
+      }
+    }
+  );
+}
+
 export default async function routes(app) {
   app.addHook("preHandler", app.auth);
 
@@ -84,19 +109,28 @@ export default async function routes(app) {
       // enrich and save
       const enriched = units.map(u => ({
         landlordId,
+        status: "vacant", // Default status for new units
         ...u
       }));
       const created = await Unit.insertMany(enriched);
       // Update floor counts for affected floors
       const floorUpdates = new Map();
+      const propertyUpdates = new Map();
       for (const u of enriched) {
-        const key = `${u.propertyId}-${u.floorId}`;
-        if (!floorUpdates.has(key)) {
-          floorUpdates.set(key, { propertyId: u.propertyId, floorId: u.floorId, landlordId });
+        const floorKey = `${u.propertyId}-${u.floorId}`;
+        const propertyKey = u.propertyId;
+        if (!floorUpdates.has(floorKey)) {
+          floorUpdates.set(floorKey, { propertyId: u.propertyId, floorId: u.floorId, landlordId });
+        }
+        if (!propertyUpdates.has(propertyKey)) {
+          propertyUpdates.set(propertyKey, { propertyId: u.propertyId, landlordId });
         }
       }
       for (const f of floorUpdates.values()) {
         await updateFloorCounts(f.propertyId, f.floorId, f.landlordId);
+      }
+      for (const p of propertyUpdates.values()) {
+        await updatePropertyUnitCount(p.propertyId, p.landlordId);
       }
       return reply.send({ success: true, units: created });
     } catch (err) {
@@ -125,11 +159,14 @@ export default async function routes(app) {
       // enrich and save
       const enriched = {
         landlordId,
+        status: "vacant", // Default status for new units
         ...body
       };
       const created = await Unit.create(enriched);
       // Update floor counts
       await updateFloorCounts(body.propertyId, body.floorId, landlordId);
+      // Update property unit count
+      await updatePropertyUnitCount(body.propertyId, landlordId);
       return reply.send({ success: true, unit: created });
     } catch (err) {
       return reply.code(400).send({
@@ -177,6 +214,7 @@ export default async function routes(app) {
       Object.assign(u, body);
       await u.save();
       await updateFloorCounts(u.propertyId, u.floorId, landlordId);
+      await updatePropertyUnitCount(u.propertyId, landlordId);
       return reply.send({ success: true, unit: u });
     } catch (err) {
       return reply.code(400).send({
@@ -218,6 +256,7 @@ export default async function routes(app) {
       const floorId = u.floorId;
       await u.deleteOne();
       await updateFloorCounts(propertyId, floorId, landlordId);
+      await updatePropertyUnitCount(propertyId, landlordId);
       return reply.send({ success: true, message: "Unit deleted successfully" });
     } catch (err) {
       return reply.code(400).send({
