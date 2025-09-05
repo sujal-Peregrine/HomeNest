@@ -13,7 +13,13 @@ const tenantSchema = z.object({
   propertyId: z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid property ID"),
   unitId: z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid unit ID"),
   monthlyRent: z.number().min(0).optional(),
-  dueDate: z.string().datetime().optional(),
+  dueDate: z.number({
+    required_error: "Due date is required",
+    invalid_type_error: "Due date must be a number"
+  })
+  .min(1, "Due date must be between 1 and 31")
+  .max(31, "Due date must be between 1 and 31")
+  .optional(),
   startingDate: z.string().datetime().optional(),
   endingDate: z.string().datetime().nullable().optional(),
   depositMoney: z.number().min(0).optional(),
