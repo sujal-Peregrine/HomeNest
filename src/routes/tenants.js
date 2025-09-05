@@ -238,7 +238,7 @@ export default async function routes(app) {
         await updatePropertyUnitCount(tenant.propertyId, landlordId); // Update property counts
       }
 
-      return reply.send({ success: true, message: "Tenant updated successfully", tenant: populatedTenant });
+      return reply.send({ success: true, message: "Tenant updated successfully", tenant: populatedTenant.toObject() });
     } catch (err) {
       return reply.code(400).send({
         success: false,
@@ -259,7 +259,7 @@ export default async function routes(app) {
           unit.status = "vacant";
           await unit.save();
           await updateFloorCounts(tenant.propertyId, unit.floorId, landlordId);
-          await updatePropertyUnitCount(tenant.propertyId, landlordId); // Update property counts
+          await updatePropertyUnitCount(tenant.propertyId, landlordId);
         }
       }
 
@@ -318,7 +318,7 @@ export default async function routes(app) {
     const landlordId = req.user.sub;
     const t = await Tenant.findOne({ _id: req.params.id, landlordId }).populate("propertyId", "name address").populate("unitId");
     if (!t) return reply.code(404).send({ success: false, message: "Tenant not found" });
-    return reply.send({ success: true, tenant: t });
+    return reply.send({ success: true, tenant: t.toObject() });
   });
 
   // ✅ Add Documents
@@ -330,7 +330,7 @@ export default async function routes(app) {
     if (t.documents.length >= 5) return reply.code(400).send({ success: false, message: "Max 5 documents" });
     t.documents.push({ type, fileUrl, fileName, uploadedAt: new Date() });
     await t.save();
-    return reply.send({ success: true, tenant: t });
+    return reply.send({ success: true, tenant: t.toObject() });
   });
   // ✅ Delete Documents
   app.delete("/:id/documents/:idx", async (req, reply) => {
@@ -343,6 +343,71 @@ export default async function routes(app) {
     }
     t.documents.splice(idx, 1);
     await t.save();
-    return reply.send({ success: true, tenant: t });
+    return reply.send({ success: true, tenant: t.toObject() });
+  });
+
+  // ✅ Pay Rent (New Endpoint)
+  app.post("/pay-rent/:id", async (req, reply) => {
+    try {
+      const landlordId = req.user.sub;
+      const tenant = await Tenant.findOne({ _id: req.params.id, landlordId });
+      if (!tenant) return reply.code(404).send({ success: false, message: "Tenant not found" });
+
+      if (!tenant.startingDate) return reply.code(400).send({ success: false, message: "Starting date required for rent payments" });
+
+      const paymentSchema = z.object({
+        forMonth: z.string().datetime().optional(),
+        amount: z.number().min(0).optional(),
+      });
+      const body = paymentSchema.parse(req.body);
+
+      const amount = body.amount || tenant.monthlyRent;
+
+      let forMonth;
+      if (body.forMonth) {
+        forMonth = new Date(body.forMonth);
+        forMonth = new Date(forMonth.getFullYear(), forMonth.getMonth(), 1);
+      } else {
+        // Find first unpaid month
+        const now = new Date();
+        let current = new Date(tenant.startingDate.getFullYear(), tenant.startingDate.getMonth(), 1);
+        const endMonth = tenant.endingDate 
+          ? new Date(tenant.endingDate.getFullYear(), tenant.endingDate.getMonth(), 1) 
+          : new Date(now.getFullYear(), now.getMonth(), 1);
+
+        const paidMonths = new Set(tenant.rentHistory.map(p => p.forMonth.toISOString()));
+
+        forMonth = null;
+        while (current <= endMonth) {
+          if (!paidMonths.has(current.toISOString())) {
+            forMonth = new Date(current);
+            break;
+          }
+          current.setMonth(current.getMonth() + 1);
+        }
+
+        if (!forMonth) {
+          return reply.code(400).send({ success: false, message: "No unpaid months" });
+        }
+      }
+
+      // Check if already paid for this month
+      if (tenant.rentHistory.some(p => p.forMonth.getTime() === forMonth.getTime())) {
+        return reply.code(400).send({ success: false, message: "Rent already paid for this month" });
+      }
+
+      tenant.rentHistory.push({
+        forMonth,
+        paidOn: new Date(),
+        amount
+      });
+      await tenant.save();
+
+      const populatedTenant = await Tenant.findOne({ _id: req.params.id, landlordId }).populate("propertyId", "name address").populate("unitId");
+
+      return reply.send({ success: true, message: "Rent paid successfully", tenant: populatedTenant.toObject() });
+    } catch (err) {
+      return reply.code(400).send({ success: false, message: err.message });
+    }
   });
 }

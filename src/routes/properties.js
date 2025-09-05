@@ -210,4 +210,60 @@ export default async function routes(app) {
       return reply.code(500).send({ success: false, message: err.message });
     }
   });
+
+  app.get("/overview", async (req, reply) => {
+    try {
+      const landlordId = req.user.sub;
+      const properties = await Property.find({ landlordId }).select('_id name totalUnits totalVacant totalOccupied');
+      if (!properties.length) {
+        return reply.send({
+          success: true,
+          data: []
+        });
+      }
+      const propertyIds = properties.map(p => new mongoose.Types.ObjectId(p._id));
+      const tenantsAgg = await Tenant.aggregate([
+        { $match: { landlordId: new mongoose.Types.ObjectId(landlordId), propertyId: { $in: propertyIds } } },
+        {
+          $group: {
+            _id: { propertyId: "$propertyId", status: "$status" },
+            totalRent: { $sum: "$monthlyRent" }
+          }
+        }
+      ]);
+      const tenantCounts = await Tenant.aggregate([
+        { $match: { landlordId: new mongoose.Types.ObjectId(landlordId), propertyId: { $in: propertyIds } } },
+        {
+          $group: {
+            _id: "$propertyId",
+            totalTenants: { $sum: 1 }
+          }
+        }
+      ]);
+      const tenantCountMap = Object.fromEntries(tenantCounts.map(t => [t._id.toString(), t.totalTenants]));
+      const rentMap = {};
+      tenantsAgg.forEach(t => {
+        const propId = t._id.propertyId.toString();
+        if (!rentMap[propId]) rentMap[propId] = { collected: 0, due: 0 };
+        if (t._id.status === "Active") rentMap[propId].collected = t.totalRent;
+        if (t._id.status === "Due") rentMap[propId].due = t.totalRent;
+      });
+      const overviewData = properties.map(p => ({
+        propertyId: p._id,
+        propertyName: p.name,
+        totalUnits: p.totalUnits || 0,
+        totalVacant: p.totalVacant || 0,
+        totalOccupied: p.totalOccupied || 0,
+        totalTenants: tenantCountMap[p._id.toString()] || 0,
+        totalRentCollected: rentMap[p._id.toString()]?.collected || 0,
+        totalDue: rentMap[p._id.toString()]?.due || 0
+      }));
+      return reply.send({
+        success: true,
+        data: overviewData
+      });
+    } catch (err) {
+      return reply.code(500).send({ success: false, message: err.message });
+    }
+  });
 }

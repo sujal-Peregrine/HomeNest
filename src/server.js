@@ -42,8 +42,9 @@ import leaseRoutes from "./routes/leases.js";
 import billingRoutes from "./routes/billing.js";
 import rentPeriodRoutes from "./routes/rentPeriods.js";
 import paymentRoutes from "./routes/payments.js";
-import dashboardRoutes from "./routes/dashboard.js";
+import profileRoutes from "./routes/profile.js";
 import floorRoutes from "./routes/floors.js";
+import overviewRoutes from "./routes/overview.js";
 
 app.register(authRoutes, { prefix: "/auth" });
 app.register(propertyRoutes, { prefix: "/properties" });
@@ -53,7 +54,8 @@ app.register(leaseRoutes, { prefix: "/leases" });
 app.register(billingRoutes, { prefix: "/billing" });
 app.register(rentPeriodRoutes, { prefix: "/rent-periods" });
 app.register(paymentRoutes, { prefix: "/rent-periods" }); // nested payments
-app.register(dashboardRoutes, { prefix: "/dashboard" });
+app.register(profileRoutes, { prefix: "/profile" });
+app.register(overviewRoutes, { prefix: "/overview" });
 app.register(floorRoutes , {prefix: "/floors"})
 
 
