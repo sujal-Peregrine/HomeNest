@@ -60,12 +60,23 @@ const RentPayment = new Schema(
 const TenantSchema = new Schema(
   {
     landlordId: { type: Types.ObjectId, ref: "users", required: true, index: true },
-    name: { type: String, required: true },
-    phone: String,
-    email: String,
+    name: { type: String, required: true, trim: true },
+    phone: { 
+      type: String, 
+      required: true, 
+      trim: true, 
+      match: [/^\d{10,15}$/, "Phone number must be 10–15 digits"] 
+    },
+    email: { 
+      type: String, 
+      required: true, 
+      lowercase: true, 
+      trim: true, 
+      match: [/.+@.+\..+/, "Invalid email address"] 
+    },
     photoUrl: String,
     propertyId: { type: Types.ObjectId, ref: "property", required: true },
-    unitId: { type: Types.ObjectId, ref: "Unit" },
+    unitId: { type: Types.ObjectId, ref: "Unit", required: true },
     monthlyRent: { type: Number, default: 0 },
     dueDate: { type: Date, default: null },
     startingDate: { type: Date, default: null },
@@ -73,12 +84,11 @@ const TenantSchema = new Schema(
     depositMoney: { type: Number, default: 0 },
     documents: [Document],
     rentHistory: [RentPayment],
-
-    // 👇 Real field in DB for fast queries
     status: { type: String, enum: ["Active", "Due"], default: "Active", index: true },
   },
   { timestamps: true }
 );
+
 
 /**
  * Virtual getter (runtime calculation, always correct)

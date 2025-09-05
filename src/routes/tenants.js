@@ -6,12 +6,12 @@ import Floor from "../models/Floor.js";
 import mongoose from "mongoose";
 
 const tenantSchema = z.object({
-  name: z.string().min(1),
-  phone: z.string().optional(),
-  email: z.string().email().optional(),
+  name: z.string().min(2, "Name is required"),
+  phone: z.string().regex(/^\d{10,15}$/, "Phone number must be 10–15 digits"),
+  email: z.string().email("Invalid email address").transform(e => e.toLowerCase()),
   photoUrl: z.string().url().optional(),
   propertyId: z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid property ID"),
-  unitId: z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid unit ID").optional(),
+  unitId: z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid unit ID"),
   monthlyRent: z.number().min(0).optional(),
   dueDate: z.string().datetime().optional(),
   startingDate: z.string().datetime().optional(),

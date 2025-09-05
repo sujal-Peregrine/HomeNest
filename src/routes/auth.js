@@ -6,7 +6,7 @@ const signupSchema = z.object({
   email: z.string().email({ message: "Invalid email address" }),
   password: z.string().min(6, "Password must be at least 6 characters"),
   name: z.string().min(2, "Name is required"),
-  phone: z.string().min(10, "Phone number must be at least 10 digits")
+  phone: z.string().regex(/^\d{10,15}$/, "Phone number must be 10–15 digits")
 });
 
 const loginSchema = z.object({
@@ -22,7 +22,7 @@ const googleSchema = z.object({
 
 const updateProfileSchema = z.object({
   name: z.string().min(2, "Name is required").optional(),
-  phone: z.string().min(10, "Phone number must be at least 10 digits").optional(),
+  phone: z.string().regex(/^\d{10,15}$/, "Phone number must be 10–15 digits").optional(),
   photoUrl: z.string().url("Invalid photo URL").optional()
 });
 
