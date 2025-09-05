@@ -67,6 +67,13 @@ export default async function routes(app) {
       }
 
       const createdFloors = await Floor.insertMany(floors);
+
+      // Update the Property document's floors count
+      await Property.findOneAndUpdate(
+        { _id: propertyId, landlordId },
+        { $inc: { floors: count } }
+      );
+
       return reply.code(201).send({ 
         success: true, 
         message: `${count} floor(s) created successfully`, 
@@ -155,7 +162,16 @@ export default async function routes(app) {
       if (floor.unitsCount > 0) {
         return reply.code(400).send({ success: false, message: "Cannot delete floor with units" });
       }
+
+      // Delete the floor
       await floor.deleteOne();
+
+      // Update the Property document's floors count
+      await Property.findOneAndUpdate(
+        { _id: floor.propertyId, landlordId },
+        { $inc: { floors: -1 } }
+      );
+
       return reply.send({ success: true, message: "Floor deleted successfully" });
     } catch (err) {
       return reply.code(400).send({ success: false, message: err.message });
