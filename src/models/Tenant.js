@@ -8,35 +8,41 @@ function calculateTenantStatus(tenant) {
   if (!tenant.startingDate) return "Active";
 
   const now = new Date();
-  const startMonth = new Date(tenant.startingDate.getFullYear(), tenant.startingDate.getMonth(), 1);
-  const endMonth = tenant.endingDate
-    ? new Date(tenant.endingDate.getFullYear(), tenant.endingDate.getMonth(), 1)
-    : new Date(now.getFullYear(), now.getMonth(), 1);
+  const currentMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
-  const paidMonths = {};
-  (tenant.rentHistory || []).forEach((p) => {
-    if (p.forMonth) {
-      paidMonths[new Date(p.forMonth).toISOString()] = true;
-    }
-  });
+  const startingMonth = new Date(
+    tenant.startingDate.getFullYear(),
+    tenant.startingDate.getMonth(),
+    1
+  );
 
-  let currentMonth = new Date(startMonth);
-  while (currentMonth <= endMonth) {
-    if (!paidMonths[currentMonth.toISOString()]) {
-      const dueForMonth = new Date(
-        currentMonth.getFullYear(),
-        currentMonth.getMonth(),
-        5 // Rent due on 5th
-      );
-      if (now > dueForMonth) {
-        return "Due";
-      }
-    }
-    currentMonth.setMonth(currentMonth.getMonth() + 1);
+  // First month -> always Active, regardless of rentHistory
+  if (
+    currentMonth.getFullYear() === startingMonth.getFullYear() &&
+    currentMonth.getMonth() === startingMonth.getMonth()
+  ) {
+    return "Active";
   }
 
+  // Get due day (default 5th if not set)
+  const dueDay = tenant.dueDate || 5;
+  const currentMonthDue = new Date(now.getFullYear(), now.getMonth(), dueDay);
+
+  // Check if rent is paid for current month
+  const isPaid = (tenant.rentHistory || []).some((payment) => {
+    const payMonth = new Date(payment.forMonth);
+    return (
+      payMonth.getFullYear() === currentMonth.getFullYear() &&
+      payMonth.getMonth() === currentMonth.getMonth()
+    );
+  });
+
+  if (isPaid) return "Active";
+  if (now > currentMonthDue) return "Due";
   return "Active";
 }
+
+
 
 const Document = new Schema(
   {
@@ -78,7 +84,7 @@ const TenantSchema = new Schema(
     propertyId: { type: Types.ObjectId, ref: "property", required: true },
     unitId: { type: Types.ObjectId, ref: "Unit", required: true },
     monthlyRent: { type: Number, default: 0 },
-    dueDate: { type: Date, default: null },
+    dueDate: { type: Number, default: null },
     startingDate: { type: Date, default: null },
     endingDate: { type: Date, default: null },
     depositMoney: { type: Number, default: 0 },
