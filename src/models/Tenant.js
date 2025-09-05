@@ -14,12 +14,13 @@ const TenantSchema = new Schema({
   phone: String,
   email: String,
   photoUrl: String,
-
-  propertyId: { type: Types.ObjectId, ref: "Property", required: true },  // ✅ ref
-  unitId: { type: Types.ObjectId, ref: "Unit" },                          // ✅ ref
-
+  propertyId: { type: Types.ObjectId, ref: "Property", required: true },
+  unitId: { type: Types.ObjectId, ref: "Unit" },
   monthlyRent: { type: Number, default: 0 },
-  dueDate: String,
+  dueDate: { type: Date, default: null }, // Updated to Date type
+  startingDate: { type: Date, default: null }, // New field
+  endingDate: { type: Date, default: null }, // New field, nullable
+  depositMoney: { type: Number, default: 0 }, // New field
   status: { type: String, enum: ["Active", "Due"], default: "Active" },
   documents: [Document],
 }, { timestamps: true });
