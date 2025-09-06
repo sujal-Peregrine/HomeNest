@@ -74,20 +74,45 @@ export default async function routes(app) {
   app.get("/", async (req, reply) => {
     try {
       const landlordId = req.user.sub;
-      const properties = await Property.find({ landlordId }).sort({ createdAt: -1 });
+  
+      // Parse query parameters for pagination
+      const querySchema = z.object({
+        page: z.string().regex(/^\d+$/).default("1").transform(Number),
+        limit: z.string().regex(/^\d+$/).default("10").transform(Number)
+      });
+      const { page, limit } = querySchema.parse(req.query);
+  
+      const skip = (page - 1) * limit;
+  
+      // Fetch properties with pagination
+      const properties = await Property.find({ landlordId })
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit);
+  
+      const totalProperties = await Property.countDocuments({ landlordId });
+      const totalPages = Math.ceil(totalProperties / limit);
+  
       return reply.send({
         success: true,
         count: properties.length,
         data: properties,
+        pagination: {
+          page,
+          limit,
+          totalPages,
+          totalItems: totalProperties
+        }
       });
     } catch (err) {
       return reply.code(500).send({
         success: false,
         message: "Failed to fetch properties",
-        error: err.message,
+        error: err.message
       });
     }
   });
+  
   // ✅ Get Single Property
   app.get("/:id", async (req, reply) => {
     try {
@@ -214,25 +239,54 @@ export default async function routes(app) {
   app.get("/overview", async (req, reply) => {
     try {
       const landlordId = req.user.sub;
-      const properties = await Property.find({ landlordId }).select('_id name totalUnits totalVacant totalOccupied');
-      if (!properties.length) {
+      const currentDate = new Date();
+
+      // Parse query parameters for pagination
+      const querySchema = z.object({
+        page: z.string().regex(/^\d+$/).default("1").transform(Number),
+        limit: z.string().regex(/^\d+$/).default("10").transform(Number)
+      });
+      const { page, limit } = querySchema.parse(req.query);
+
+      // Fetch properties with pagination
+      const skip = (page - 1) * limit;
+      const properties = await Property.find({ landlordId })
+        .select('_id name totalUnits totalVacant totalOccupied')
+        .skip(skip)
+        .limit(limit)
+        .sort({ createdAt: -1 });
+
+      if (!properties.length && page === 1) {
         return reply.send({
           success: true,
-          data: []
+          data: [],
+          pagination: {
+            page,
+            limit,
+            totalPages: 0,
+            totalItems: 0
+          }
         });
       }
+
+      // Get total count of properties for pagination
+      const totalProperties = await Property.countDocuments({ landlordId });
+
+      // Fetch all tenants for the landlord's properties
       const propertyIds = properties.map(p => new mongoose.Types.ObjectId(p._id));
-      const tenantsAgg = await Tenant.aggregate([
-        { $match: { landlordId: new mongoose.Types.ObjectId(landlordId), propertyId: { $in: propertyIds } } },
-        {
-          $group: {
-            _id: { propertyId: "$propertyId", status: "$status" },
-            totalRent: { $sum: "$monthlyRent" }
-          }
-        }
-      ]);
+      const tenants = await Tenant.find({
+        landlordId: new mongoose.Types.ObjectId(landlordId),
+        propertyId: { $in: propertyIds }
+      }).select("propertyId monthlyRent startingDate endingDate dueDate rentHistory");
+
+      // Calculate tenant counts per property
       const tenantCounts = await Tenant.aggregate([
-        { $match: { landlordId: new mongoose.Types.ObjectId(landlordId), propertyId: { $in: propertyIds } } },
+        {
+          $match: {
+            landlordId: new mongoose.Types.ObjectId(landlordId),
+            propertyId: { $in: propertyIds }
+          }
+        },
         {
           $group: {
             _id: "$propertyId",
@@ -240,14 +294,63 @@ export default async function routes(app) {
           }
         }
       ]);
-      const tenantCountMap = Object.fromEntries(tenantCounts.map(t => [t._id.toString(), t.totalTenants]));
+      const tenantCountMap = Object.fromEntries(
+        tenantCounts.map(t => [t._id.toString(), t.totalTenants])
+      );
+
+      // Calculate rent collected, due, and overpaid per property
       const rentMap = {};
-      tenantsAgg.forEach(t => {
-        const propId = t._id.propertyId.toString();
-        if (!rentMap[propId]) rentMap[propId] = { collected: 0, due: 0 };
-        if (t._id.status === "Active") rentMap[propId].collected = t.totalRent;
-        if (t._id.status === "Due") rentMap[propId].due = t.totalRent;
-      });
+      for (const tenant of tenants) {
+        const propId = tenant.propertyId.toString();
+        if (!rentMap[propId]) {
+          rentMap[propId] = { collected: 0, due: 0, overpaid: 0 };
+        }
+
+        if (!tenant.startingDate || !tenant.monthlyRent || !tenant.dueDate) continue;
+
+        const start = new Date(tenant.startingDate);
+        const end = tenant.endingDate ? new Date(tenant.endingDate) : currentDate;
+
+        // Generate all months from start to end date or current date
+        const monthsToCheck = [];
+        let current = new Date(start.getFullYear(), start.getMonth(), 1);
+        
+        while (current <= end && current <= currentDate) {
+          // Exclude current month if before dueDate
+          if (
+            current.getFullYear() === currentDate.getFullYear() &&
+            current.getMonth() === currentDate.getMonth() &&
+            currentDate.getDate() < tenant.dueDate
+          ) {
+            break;
+          }
+          monthsToCheck.push({
+            month: current.getMonth() + 1,
+            year: current.getFullYear()
+          });
+          current.setMonth(current.getMonth() + 1);
+        }
+
+        // Calculate total expected rent
+        const totalExpectedRent = monthsToCheck.length * tenant.monthlyRent;
+
+        // Sum all paid amounts from rentHistory
+        const paidAmount = tenant.rentHistory.reduce((sum, rh) => {
+          return rh.status === "Paid" ? sum + rh.amount : sum;
+        }, 0);
+
+        rentMap[propId].collected += paidAmount;
+
+        // Calculate due or overpaid for this tenant
+        const tenantBalance = totalExpectedRent - paidAmount;
+        if (tenantBalance > 0) {
+          rentMap[propId].due += tenantBalance; // Underpayment
+        } else {
+          rentMap[propId].overpaid += Math.abs(tenantBalance); // Overpayment
+        }
+      }
+
+      // Construct overview data
       const overviewData = properties.map(p => ({
         propertyId: p._id,
         propertyName: p.name,
@@ -256,11 +359,19 @@ export default async function routes(app) {
         totalOccupied: p.totalOccupied || 0,
         totalTenants: tenantCountMap[p._id.toString()] || 0,
         totalRentCollected: rentMap[p._id.toString()]?.collected || 0,
-        totalDue: rentMap[p._id.toString()]?.due || 0
+        totalDue: rentMap[p._id.toString()]?.due || 0,
+        overpaid: rentMap[p._id.toString()]?.overpaid || 0
       }));
+
       return reply.send({
         success: true,
-        data: overviewData
+        data: overviewData,
+        pagination: {
+          page,
+          limit,
+          totalPages: Math.ceil(totalProperties / limit),
+          totalItems: totalProperties
+        }
       });
     } catch (err) {
       return reply.code(500).send({ success: false, message: err.message });

@@ -8,6 +8,14 @@ const Document = new Schema({
   uploadedAt: { type: Date, default: Date.now }
 }, { _id: false });
 
+const RentHistory = new Schema({
+  month: { type: Number, required: true }, // 1-12
+  year: { type: Number, required: true },
+  amount: { type: Number, required: true },
+  paidAt: { type: Date, default: Date.now },
+  status: { type: String, enum: ["Paid", "Due"], default: "Paid" }
+}, { _id: false });
+
 const TenantSchema = new Schema(
   {
     landlordId: { type: Types.ObjectId, ref: "users", required: true, index: true },
@@ -20,13 +28,13 @@ const TenantSchema = new Schema(
     },
     email: { 
       type: String, 
-      required: true, 
       lowercase: true, 
       trim: true, 
-      match: [/.+@.+\..+/, "Invalid email address"] 
+      match: [/.+@.+\..+/, "Invalid email address"],
+      optional: true
     },
     photoUrl: String,
-    propertyId: { type: Types.ObjectId, ref: "property", required: true },
+    propertyId: { type: Types.ObjectId, ref: "properties", required: true },
     unitId: { type: Types.ObjectId, ref: "Unit", required: true },
     monthlyRent: { type: Number, default: 0 },
     dueDate: { type: Number, default: null },
@@ -34,7 +42,7 @@ const TenantSchema = new Schema(
     endingDate: { type: Date, default: null },
     depositMoney: { type: Number, default: 0 },
     documents: [Document],
-    status: { type: String, enum: ["Active", "Due"], default: "Active", index: true },
+    rentHistory: [RentHistory]
   },
   { timestamps: true }
 );
