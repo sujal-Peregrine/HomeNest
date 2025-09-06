@@ -1,6 +1,12 @@
 import argon2 from "argon2";
 import { z } from "zod";
+import jwt from "jsonwebtoken";
 import User from "../models/User.js";
+import sgMail from "@sendgrid/mail";
+import dotenv from 'dotenv';
+import { emailLayout } from "../utils/emailTemplate.js";
+dotenv.config();
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 const signupSchema = z.object({
   email: z.string().email({ message: "Invalid email address" }),
@@ -170,6 +176,94 @@ export default async function routes(app) {
       return reply.send({ success: true, message: "Password updated successfully" });
     } catch (err) {
       if (err instanceof z.ZodError) return handleZodError(err, reply);
+      return reply.code(500).send({ success: false, message: "Internal server error" });
+    }
+  });
+
+  app.post("/forgot-password", async (req, reply) => {
+    try {
+      const { email } = req.body;
+      if (!email) {
+        return reply.code(400).send({ success: false, message: "Email is required" });
+      }
+  
+      const user = await User.findOne({ email });
+      if (!user) {
+        return reply.code(404).send({ success: false, message: "User not found" });
+      }
+  
+      const payload = { id: user._id.toString(), email: user.email };
+      const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "10m" });
+  
+      user.resetToken = token;
+      user.resetTokenExpires = new Date(Date.now() + 10 * 60 * 1000);
+      await user.save();
+  
+      const url = `${process.env.DOMAIN_URL}/auth/reset-password/${encodeURIComponent(token)}`;
+  
+      const html = emailLayout({
+        website_logo: "https://yourdomain.com/logo.png",
+        heading: "Reset Your Password",
+        subheading: "Click the link below to reset your password",
+        content: `
+          <p>Hello ${user.name || "User"},</p>
+          <p>Click the button below to reset your password (expires in 10 minutes):</p>
+          <a href="${url}" style="background:#3490dc;color:#fff;padding:10px 20px;text-decoration:none;border-radius:5px;">
+            Reset Password
+          </a>
+          <p>If you didn't request this, you can safely ignore this email.</p>
+        `
+      });
+  
+      await sgMail.send({
+        to: user.email,
+        from: process.env.EMAIL_FROM,
+        subject: "Password Reset Link",
+        html,
+        trackingSettings: { clickTracking: { enable: false, enableText: false } }
+      });
+  
+      return reply.send({ success: true, message: "Password reset email sent" });
+    } catch (err) {
+      console.error(err);
+      return reply.code(500).send({ success: false, message: "Internal server error" });
+    }
+  });
+
+  app.post("/reset-password/*", async (req, reply) => {
+    try {
+      // decode URL-encoded token
+      const token = decodeURIComponent(req.params['*']); 
+      const { password } = req.body;
+  
+      if (!password) {
+        return reply.code(400).send({ success: false, message: "Password is required" });
+      }
+  
+      let decoded;
+      try {
+        decoded = jwt.verify(token, process.env.JWT_SECRET);
+      } catch (err) {
+        return reply.code(401).send({ success: false, message: "Invalid or expired token" });
+      }
+  
+      const user = await User.findOne({ _id: decoded.id, resetToken: token });
+      if (!user) {
+        return reply.code(404).send({ success: false, message: "User not found or token invalid" });
+      }
+  
+      if (user.resetTokenExpires < new Date()) {
+        return reply.code(401).send({ success: false, message: "Token expired" });
+      }
+  
+      user.passwordHash = await argon2.hash(password);
+      user.resetToken = undefined;
+      user.resetTokenExpires = undefined;
+      await user.save();
+  
+      return reply.send({ success: true, message: "Password reset successfully" });
+    } catch (err) {
+      console.error(err);
       return reply.code(500).send({ success: false, message: "Internal server error" });
     }
   });
