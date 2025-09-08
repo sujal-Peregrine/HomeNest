@@ -142,39 +142,45 @@ export default async function routes(app) {
   });
 
   // ✅ Single create unit
-  app.post("/", async (req, reply) => {
-    try {
-      const body = singleSchema.parse(req.body);
-      const landlordId = req.user.sub;
-      // validate property ownership
-      const property = await Property.findOne({ _id: body.propertyId, landlordId });
-      if (!property) {
-        return reply.code(404).send({ success: false, message: `Property ${body.propertyId} not found` });
-      }
-      // validate floor exists
-      const floor = await Floor.findOne({ _id: body.floorId, propertyId: body.propertyId, landlordId });
-      if (!floor) {
-        return reply.code(400).send({ success: false, message: `Floor ${body.floorId} not found in property '${property.name}'` });
-      }
-      // enrich and save
-      const enriched = {
-        landlordId,
-        status: "vacant", // Default status for new units
-        ...body
-      };
-      const created = await Unit.create(enriched);
-      // Update floor counts
-      await updateFloorCounts(body.propertyId, body.floorId, landlordId);
-      // Update property unit count
-      await updatePropertyUnitCount(body.propertyId, landlordId);
-      return reply.send({ success: true, unit: created });
-    } catch (err) {
+app.post("/", async (req, reply) => {
+  try {
+    const body = singleSchema.parse(req.body);
+    const landlordId = req.user.sub;
+    // validate property ownership
+    const property = await Property.findOne({ _id: body.propertyId, landlordId });
+    if (!property) {
+      return reply.code(404).send({ success: false, message: `Property ${body.propertyId} not found` });
+    }
+    // validate floor exists
+    const floor = await Floor.findOne({ _id: body.floorId, propertyId: body.propertyId, landlordId });
+    if (!floor) {
+      return reply.code(400).send({ success: false, message: `Floor ${body.floorId} not found in property '${property.name}'` });
+    }
+    // enrich and save
+    const enriched = {
+      landlordId,
+      status: "vacant", // Default status for new units
+      ...body
+    };
+    const created = await Unit.create(enriched);
+    // Update floor counts
+    await updateFloorCounts(body.propertyId, body.floorId, landlordId);
+    // Update property unit count
+    await updatePropertyUnitCount(body.propertyId, landlordId);
+    return reply.send({ success: true, unit: created });
+  } catch (err) {
+    if (err.code === 11000) {
       return reply.code(400).send({
         success: false,
-        message: err.errors ? err.errors[0].message : err.message,
+        message: `A unit with label '${req.body.unitLabel}' already exists for this property.`
       });
     }
-  });
+    return reply.code(400).send({
+      success: false,
+      message: err.errors ? err.errors[0].message : err.message,
+    });
+  }
+});
 
   // ✅ Get all units (optionally by propertyId)
   app.get("/", async (req, reply) => {
@@ -217,6 +223,12 @@ export default async function routes(app) {
       await updatePropertyUnitCount(u.propertyId, landlordId);
       return reply.send({ success: true, unit: u });
     } catch (err) {
+      if (err.code === 11000) {
+        return reply.code(400).send({
+          success: false,
+          message: `A unit with label '${req.body.unitLabel}' already exists for this property.`
+        });
+      }
       return reply.code(400).send({
         success: false,
         message: err.message,
