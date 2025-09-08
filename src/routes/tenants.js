@@ -10,8 +10,8 @@ const tenantSchema = z.object({
   phone: z.string().regex(/^\d{10,15}$/, "Phone number must be 10–15 digits"),
   email: z.string().email("Invalid email address").transform(e => e.toLowerCase()).optional(),
   photoUrl: z.string().url().optional(),
-  propertyId: z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid property ID"),
-  unitId: z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid unit ID"),
+  propertyId: z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid property ID").optional(),
+  unitId: z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid unit ID").optional(),
   monthlyRent: z.number().min(0).optional(),
   dueDate: z.number({
     required_error: "Due date is required",
@@ -40,6 +40,12 @@ const tenantSchema = z.object({
 
 // Function to calculate tenant status, due, and overpaid amounts
 function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
+  // If tenant has no unit assigned, return Vacant status
+  if (!tenant.unitId) {
+    return { status: "Vacant", due: 0, overpaid: 0 };
+  }
+
+  // If tenant has no startingDate, dueDate, or monthlyRent, return Due status
   if (!tenant.startingDate || !tenant.dueDate || !tenant.monthlyRent) {
     return { status: "Due", due: 0, overpaid: 0 };
   }
@@ -83,7 +89,7 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   const due = tenantBalance > 0 ? tenantBalance : 0;
   const overpaid = tenantBalance < 0 ? Math.abs(tenantBalance) : 0;
 
-  // Status is "Due" if due > 0
+  // Status is "Due" if due > 0, otherwise "Active"
   const status = due > 0 ? "Due" : "Active";
 
   return { status, due, overpaid };
@@ -148,37 +154,62 @@ export default async function routes(app) {
       const landlordId = req.user.sub;
       const body = tenantSchema.parse(req.body);
 
-      // Check property exists and belongs to landlord
-      const property = await Property.findOne({ _id: body.propertyId, landlordId });
-      if (!property) {
-        return reply.code(400).send({ success: false, message: "Invalid property" });
-      }
+      let property = null;
+      if (body.propertyId) {
+        // Check property exists and belongs to landlord
+        property = await Property.findOne({ _id: body.propertyId, landlordId });
+        if (!property) {
+          return reply.code(400).send({ success: false, message: "Invalid property" });
+        }
 
-      // Check for unique email within the same property (if provided)
-      if (body.email) {
-        const existingTenantWithEmail = await Tenant.findOne({
-          email: body.email,
+        // Check for unique email within the same property (if provided)
+        if (body.email) {
+          const existingTenantWithEmail = await Tenant.findOne({
+            email: body.email,
+            propertyId: body.propertyId,
+            landlordId
+          });
+          if (existingTenantWithEmail) {
+            return reply.code(400).send({ success: false, message: `Email '${body.email}' is already in use by another tenant in this property` });
+          }
+        }
+
+        // Check for unique phone within the same property
+        const existingTenantWithPhone = await Tenant.findOne({
+          phone: body.phone,
           propertyId: body.propertyId,
           landlordId
         });
-        if (existingTenantWithEmail) {
-          return reply.code(400).send({ success: false, message: `Email '${body.email}' is already in use by another tenant in this property` });
+        if (existingTenantWithPhone) {
+          return reply.code(400).send({ success: false, message: `Phone number '${body.phone}' is already in use by another tenant in this property` });
         }
-      }
-
-      // Check for unique phone within the same property
-      const existingTenantWithPhone = await Tenant.findOne({
-        phone: body.phone,
-        propertyId: body.propertyId,
-        landlordId
-      });
-      if (existingTenantWithPhone) {
-        return reply.code(400).send({ success: false, message: `Phone number '${body.phone}' is already in use by another tenant in this property` });
+      } else {
+        // If no property, check unique phone globally
+        const existingTenantWithPhone = await Tenant.findOne({
+          phone: body.phone,
+          landlordId
+        });
+        if (existingTenantWithPhone) {
+          return reply.code(400).send({ success: false, message: `Phone number '${body.phone}' is already in use by another tenant` });
+        }
+        // Check unique email globally
+        if (body.email) {
+          const existingTenantWithEmail = await Tenant.findOne({
+            email: body.email,
+            landlordId
+          });
+          if (existingTenantWithEmail) {
+            return reply.code(400).send({ success: false, message: `Email '${body.email}' is already in use by another tenant` });
+          }
+        }
       }
 
       let unit = null;
       let floorId = null;
       if (body.unitId) {
+        if (!body.propertyId) {
+          return reply.code(400).send({ success: false, message: "Cannot assign unit without specifying property" });
+        }
         // Check unit exists under this property
         unit = await Unit.findOne({ _id: body.unitId, propertyId: body.propertyId, landlordId });
         if (!unit) {
@@ -201,7 +232,7 @@ export default async function routes(app) {
         ...body
       });
 
-      if (floorId) {
+      if (floorId && body.propertyId) {
         await updateFloorCounts(body.propertyId, floorId, landlordId);
         await updatePropertyUnitCount(body.propertyId, landlordId);
       }
@@ -235,58 +266,126 @@ export default async function routes(app) {
       const tenant = await Tenant.findOne({ _id: req.params.id, landlordId });
       if (!tenant) return reply.code(404).send({ success: false, message: "Tenant not found" });
 
-      // Check for unique email within the same property (if provided)
-      if (body.email) {
-        const existingTenantWithEmail = await Tenant.findOne({
-          email: body.email,
-          propertyId: tenant.propertyId,
-          landlordId,
-          _id: { $ne: tenant._id }
-        });
-        if (existingTenantWithEmail) {
-          return reply.code(400).send({ success: false, message: `Email '${body.email}' is already in use by another tenant in this property` });
+      const oldPropertyId = tenant.propertyId ? tenant.propertyId.toString() : null;
+      let targetPropertyId = oldPropertyId;
+      let property = null;
+
+      if (body.propertyId !== undefined) {
+        if (body.propertyId === null) {
+          targetPropertyId = null;
+        } else {
+          property = await Property.findOne({ _id: body.propertyId, landlordId });
+          if (!property) {
+            return reply.code(400).send({ success: false, message: "Invalid property" });
+          }
+          targetPropertyId = body.propertyId;
         }
       }
 
-      // Check for unique phone within the same property (if provided)
-      if (body.phone) {
-        const existingTenantWithPhone = await Tenant.findOne({
-          phone: body.phone,
-          propertyId: tenant.propertyId,
-          landlordId,
-          _id: { $ne: tenant._id }
-        });
+      // Check for unique email (if provided or changing property)
+      if (body.email || (body.propertyId !== undefined && targetPropertyId !== oldPropertyId)) {
+        const emailToCheck = body.email || tenant.email;
+        if (emailToCheck) {
+          let existingTenantWithEmail;
+          if (targetPropertyId) {
+            existingTenantWithEmail = await Tenant.findOne({
+              email: emailToCheck,
+              propertyId: targetPropertyId,
+              landlordId,
+              _id: { $ne: tenant._id }
+            });
+          } else {
+            existingTenantWithEmail = await Tenant.findOne({
+              email: emailToCheck,
+              propertyId: null,
+              landlordId,
+              _id: { $ne: tenant._id }
+            });
+          }
+          if (existingTenantWithEmail) {
+            return reply.code(400).send({ success: false, message: `Email '${emailToCheck}' is already in use by another tenant` });
+          }
+        }
+      }
+
+      // Check for unique phone (similarly)
+      if (body.phone || (body.propertyId !== undefined && targetPropertyId !== oldPropertyId)) {
+        const phoneToCheck = body.phone || tenant.phone;
+        let existingTenantWithPhone;
+        if (targetPropertyId) {
+          existingTenantWithPhone = await Tenant.findOne({
+            phone: phoneToCheck,
+            propertyId: targetPropertyId,
+            landlordId,
+            _id: { $ne: tenant._id }
+          });
+        } else {
+          existingTenantWithPhone = await Tenant.findOne({
+            phone: phoneToCheck,
+            propertyId: null,
+            landlordId,
+            _id: { $ne: tenant._id }
+          });
+        }
         if (existingTenantWithPhone) {
-          return reply.code(400).send({ success: false, message: `Phone number '${body.phone}' is already in use by another tenant in this property` });
+          return reply.code(400).send({ success: false, message: `Phone number '${phoneToCheck}' is already in use by another tenant` });
         }
       }
 
-      let oldUnitId = tenant.unitId;
+      let oldUnitId = tenant.unitId ? tenant.unitId.toString() : null;
       let oldFloorId = null;
       let newFloorId = null;
 
-      if (body.unitId && body.unitId !== tenant.unitId?.toString()) {
-        // Handle unit change
-        if (oldUnitId) {
-          const oldUnit = await Unit.findOne({ _id: oldUnitId, landlordId });
-          if (oldUnit) {
-            oldUnit.status = "vacant";
-            await oldUnit.save();
-            oldFloorId = oldUnit.floorId;
+      if (body.unitId !== undefined) {
+        if (body.unitId === null) {
+          // Unassign unit
+          if (oldUnitId) {
+            const oldUnit = await Unit.findOne({ _id: oldUnitId, landlordId });
+            if (oldUnit) {
+              oldUnit.status = "vacant";
+              await oldUnit.save();
+              oldFloorId = oldUnit.floorId.toString();
+            }
+          }
+        } else {
+          if (!targetPropertyId) {
+            return reply.code(400).send({ success: false, message: "Cannot assign unit without a property" });
+          }
+          if (body.unitId === oldUnitId) {
+            // No change
+          } else {
+            // Vacate old unit if exists
+            if (oldUnitId) {
+              const oldUnit = await Unit.findOne({ _id: oldUnitId, landlordId });
+              if (oldUnit) {
+                oldUnit.status = "vacant";
+                await oldUnit.save();
+                oldFloorId = oldUnit.floorId.toString();
+              }
+            }
+            // Assign new unit
+            const newUnit = await Unit.findOne({ _id: body.unitId, propertyId: targetPropertyId, landlordId });
+            if (!newUnit) {
+              return reply.code(400).send({ success: false, message: "Invalid new unit for this property" });
+            }
+            const existingTenant = await Tenant.findOne({ unitId: body.unitId, _id: { $ne: req.params.id } });
+            if (existingTenant) {
+              return reply.code(400).send({ success: false, message: "New unit already occupied by another tenant" });
+            }
+            newUnit.status = "occupied";
+            await newUnit.save();
+            newFloorId = newUnit.floorId.toString();
           }
         }
-
-        const newUnit = await Unit.findOne({ _id: body.unitId, propertyId: tenant.propertyId, landlordId });
-        if (!newUnit) {
-          return reply.code(400).send({ success: false, message: "Invalid new unit for this property" });
+      } else if (targetPropertyId !== oldPropertyId && oldUnitId) {
+        // If changing property without touching unit, force unassign unit
+        const oldUnit = await Unit.findOne({ _id: oldUnitId, landlordId });
+        if (oldUnit) {
+          oldUnit.status = "vacant";
+          await oldUnit.save();
+          oldFloorId = oldUnit.floorId.toString();
         }
-        const existingTenant = await Tenant.findOne({ unitId: body.unitId, _id: { $ne: req.params.id } });
-        if (existingTenant) {
-          return reply.code(400).send({ success: false, message: "New unit already occupied by another tenant" });
-        }
-        newUnit.status = "occupied";
-        await newUnit.save();
-        newFloorId = newUnit.floorId;
+        body.unitId = null;
       }
 
       Object.assign(tenant, body);
@@ -296,14 +395,20 @@ export default async function routes(app) {
         .populate("propertyId", "name address")
         .populate("unitId");
 
-      if (oldFloorId) {
-        await updateFloorCounts(tenant.propertyId, oldFloorId, landlordId);
+      // Update counts
+      if (oldFloorId && oldPropertyId) {
+        await updateFloorCounts(oldPropertyId, oldFloorId, landlordId);
       }
-      if (newFloorId) {
-        await updateFloorCounts(tenant.propertyId, newFloorId, landlordId);
+      if (newFloorId && targetPropertyId) {
+        await updateFloorCounts(targetPropertyId, newFloorId, landlordId);
       }
-      if (oldFloorId || newFloorId) {
-        await updatePropertyUnitCount(tenant.propertyId, landlordId);
+      if (oldPropertyId !== targetPropertyId || oldFloorId || newFloorId) {
+        if (oldPropertyId) {
+          await updatePropertyUnitCount(oldPropertyId, landlordId);
+        }
+        if (targetPropertyId && targetPropertyId !== oldPropertyId) {
+          await updatePropertyUnitCount(targetPropertyId, landlordId);
+        }
       }
 
       const { status, due, overpaid } = calculateTenantStatusAndDue(populatedTenant);
@@ -327,7 +432,7 @@ export default async function routes(app) {
       const tenant = await Tenant.findOne({ _id: req.params.id, landlordId });
       if (!tenant) return reply.code(404).send({ success: false, message: "Tenant not found" });
 
-      if (tenant.unitId) {
+      if (tenant.unitId && tenant.propertyId) {
         const unit = await Unit.findOne({ _id: tenant.unitId, landlordId });
         if (unit) {
           unit.status = "vacant";
@@ -397,7 +502,55 @@ export default async function routes(app) {
       });
     }
   });
+
+  // ✅ List Unassigned Tenants
+  app.get("/unassigned", async (req, reply) => {
+    try {
+      const landlordId = req.user.sub;
   
+      // Parse query parameters for pagination
+      const querySchema = z.object({
+        page: z.string().regex(/^\d+$/).default("1").transform(Number),
+        limit: z.string().regex(/^\d+$/).default("10").transform(Number)
+      });
+      const { page, limit } = querySchema.parse(req.query);
+  
+      const skip = (page - 1) * limit;
+  
+      // Fetch unassigned tenants with pagination
+      const tenants = await Tenant.find({ landlordId, propertyId: null })
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit);
+  
+      const totalTenants = await Tenant.countDocuments({ landlordId, propertyId: null });
+      const totalPages = Math.ceil(totalTenants / limit);
+  
+      // Enrich tenants manually
+      const enrichedTenants = tenants.map(t => {
+        const { status, due, overpaid } = calculateTenantStatusAndDue(t);
+        return { ...t.toObject(), status, due, overpaid };
+      });
+  
+      return reply.send({
+        success: true,
+        count: enrichedTenants.length,
+        tenants: enrichedTenants,
+        pagination: {
+          page,
+          limit,
+          totalPages,
+          totalItems: totalTenants
+        }
+      });
+    } catch (err) {
+      return reply.code(500).send({
+        success: false,
+        message: "Failed to fetch unassigned tenants",
+        error: err.message
+      });
+    }
+  });
 
   // ✅ Get Single Tenant
   app.get("/:id", async (req, reply) => {
