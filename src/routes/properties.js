@@ -277,7 +277,7 @@ export default async function routes(app) {
       const tenants = await Tenant.find({
         landlordId: new mongoose.Types.ObjectId(landlordId),
         propertyId: { $in: propertyIds }
-      }).select("propertyId monthlyRent startingDate endingDate dueDate rentHistory");
+      }).select("propertyId unitId monthlyRent startingDate endingDate dueDate rentHistory");
 
       // Calculate tenant counts per property
       const tenantCounts = await Tenant.aggregate([
@@ -301,11 +301,15 @@ export default async function routes(app) {
       // Calculate rent collected, due, and overpaid per property
       const rentMap = {};
       for (const tenant of tenants) {
+        // Skip tenants without an assigned unit
+        if (!tenant.unitId) continue;
+
         const propId = tenant.propertyId.toString();
         if (!rentMap[propId]) {
           rentMap[propId] = { collected: 0, due: 0, overpaid: 0 };
         }
 
+        // Skip tenants without required rent calculation fields
         if (!tenant.startingDate || !tenant.monthlyRent || !tenant.dueDate) continue;
 
         const start = new Date(tenant.startingDate);

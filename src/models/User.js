@@ -14,6 +14,11 @@ const UserSchema = new Schema({
   name: { type: String },
   phone: { type: String, unique:true, trim:true ,match: [/^\d{10,15}$/, "Invalid phone number"]},
   photoUrl: { type: String },
+  resetToken: { type: String },
+  resetTokenExpires: { type: Date },
+  resetOtp: { type: String },          
+  resetOtpExpires: { type: Date }, 
 }, { timestamps: true });
+
 
 export default model("users", UserSchema);

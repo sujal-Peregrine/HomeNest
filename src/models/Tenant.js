@@ -34,8 +34,8 @@ const TenantSchema = new Schema(
       optional: true
     },
     photoUrl: String,
-    propertyId: { type: Types.ObjectId, ref: "properties", required: true },
-    unitId: { type: Types.ObjectId, ref: "Unit", required: true },
+    propertyId: { type: Types.ObjectId, ref: "properties", required: false },
+    unitId: { type: Types.ObjectId, ref: "Unit", required: false },
     monthlyRent: { type: Number, default: 0 },
     dueDate: { type: Number, default: null },
     startingDate: { type: Date, default: null },

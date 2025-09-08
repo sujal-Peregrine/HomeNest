@@ -28,7 +28,7 @@ export default async function routes(app) {
 
       // Fetch all tenants for the landlord
       const tenants = await Tenant.find({ landlordId })
-        .select("monthlyRent startingDate endingDate dueDate rentHistory");
+        .select("unitId monthlyRent startingDate endingDate dueDate rentHistory");
 
       let totalRentCollected = 0;
       let totalDue = 0;
@@ -36,6 +36,10 @@ export default async function routes(app) {
 
       // Calculate rent for each tenant
       for (const tenant of tenants) {
+        // Skip tenants without an assigned unit
+        if (!tenant.unitId) continue;
+
+        // Skip tenants without required rent calculation fields
         if (!tenant.startingDate || !tenant.monthlyRent || !tenant.dueDate) continue;
 
         const start = new Date(tenant.startingDate);

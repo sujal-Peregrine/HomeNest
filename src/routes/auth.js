@@ -1,6 +1,13 @@
 import argon2 from "argon2";
 import { z } from "zod";
+import jwt from "jsonwebtoken";
 import User from "../models/User.js";
+import sgMail from "@sendgrid/mail";
+import dotenv from 'dotenv';
+import { emailLayout } from "../utils/emailTemplate.js";
+import crypto from "crypto";
+dotenv.config();
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 const signupSchema = z.object({
   email: z.string().email({ message: "Invalid email address" }),
@@ -173,4 +180,88 @@ export default async function routes(app) {
       return reply.code(500).send({ success: false, message: "Internal server error" });
     }
   });
+
+
+app.post("/forgot-password", async (req, reply) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return reply.code(400).send({ success: false, message: "Email is required" });
+    }
+
+    const user = await User.findOne({ email });
+    if (!user) {
+      return reply.code(404).send({ success: false, message: "User not found" });
+    }
+
+    // Generate 6-digit OTP
+    const otp = crypto.randomInt(100000, 999999).toString();
+
+    user.resetOtp = otp;
+    user.resetOtpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    await user.save();
+
+    const html = emailLayout({
+      heading: "Reset Your Password",
+      subheading: "Use the OTP below to reset your password",
+      content: `
+        <p>Hello ${user.name || "User"},</p>
+        <p>Your OTP for password reset is:</p>
+        <h2 style="color:#3490dc;">${otp}</h2>
+        <p>This OTP will expire in 10 minutes.</p>
+        <p>If you didn't request this, you can safely ignore this email.</p>
+      `
+    });
+
+    await sgMail.send({
+      to: user.email,
+      from: process.env.EMAIL_FROM,
+      subject: "Password Reset OTP",
+      html,
+      trackingSettings: { clickTracking: { enable: false, enableText: false } }
+    });
+
+    return reply.send({ success: true, message: "OTP sent to email" });
+  } catch (err) {
+    console.error(err);
+    return reply.code(500).send({ success: false, message: "Internal server error" });
+  }
+});
+
+app.post("/reset-password", async (req, reply) => {
+  try {
+    const { email, otp, password } = req.body;
+
+    if (!email || !otp || !password) {
+      return reply.code(400).send({ success: false, message: "Email, OTP, and password are required" });
+    }
+
+    const user = await User.findOne({ email, resetOtp: otp });
+    if (!user) {
+      return reply.code(400).send({ success: false, message: "Invalid OTP or email" });
+    }
+
+    if (user.resetOtpExpires < new Date()) {
+      return reply.code(400).send({ success: false, message: "OTP expired" });
+    }
+
+    // ✅ Check if new password is same as old one
+    const isSamePassword = await argon2.verify(user.passwordHash, password);
+    if (isSamePassword) {
+      return reply.code(400).send({ success: false, message: "New password cannot be same as old password" });
+    }
+
+    user.passwordHash = await argon2.hash(password);
+    user.resetOtp = undefined;
+    user.resetOtpExpires = undefined;
+    await user.save();
+
+    return reply.send({ success: true, message: "Password reset successfully" });
+  } catch (err) {
+    console.error(err);
+    return reply.code(500).send({ success: false, message: "Internal server error" });
+  }
+});
+
+
 }
