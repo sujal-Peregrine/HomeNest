@@ -82,19 +82,26 @@ export default async function routes(app) {
   app.post("/login", async (req, reply) => {
     try {
       const body = loginSchema.parse(req.body);
-
+  
+      // Check if email exists
       const user = await User.findOne({ email: body.email });
-      if (!user || !user.passwordHash) {
-        return reply.code(401).send({ success: false, message: "Invalid credentials" });
+      if (!user) {
+        return reply.code(404).send({
+          success: false,
+          message: "Email does not exist. Please check and try again."
+        });
       }
-
-      const ok = await argon2.verify(user.passwordHash, body.password);
-      if (!ok) {
-        return reply.code(401).send({ success: false, message: "Invalid credentials" });
+      // Verify password
+      const validPassword = await argon2.verify(user.passwordHash, body.password);
+      if (!validPassword) {
+        return reply.code(401).send({
+          success: false,
+          message: "Incorrect password. Please try again."
+        });
       }
-
       const token = app.jwt.sign({ sub: user._id.toString(), email: user.email });
       return reply.send({ success: true, token });
+  
     } catch (err) {
       if (err instanceof z.ZodError) return handleZodError(err, reply);
       return reply.code(500).send({ success: false, message: "Internal server error" });
