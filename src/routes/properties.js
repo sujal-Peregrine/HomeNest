@@ -32,12 +32,11 @@ function floorName(i) {
 function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   // If tenant has no unit assigned, return Unassigned status
   if (!tenant.unitId) {
-    return { status: "Unassigned", due: 0, overpaid: 0, dueAmountDate: null };
+    return { status: "Unassigned", due: 0, overpaid: 0, dueAmountDate: null, totalPaid: 0 };
   }
 
-  // If tenant has no startingDate, dueDate, or monthlyRent, return Due status
   if (!tenant.startingDate || !tenant.dueDate || !tenant.monthlyRent) {
-    return { status: "Due", due: 0, overpaid: 0, dueAmountDate: null };
+    return { status: "Due", due: 0, overpaid: 0, dueAmountDate: null, totalPaid: 0 };
   }
 
   const start = new Date(tenant.startingDate);
@@ -56,22 +55,14 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
     ) {
       break;
     }
-    monthsToCheck.push({
-      month: current.getMonth() + 1,
-      year: current.getFullYear(),
-    });
+    monthsToCheck.push({ month: current.getMonth() + 1, year: current.getFullYear() });
     current.setMonth(current.getMonth() + 1);
   }
 
-  // Calculate total expected rent
   const totalExpectedRent = monthsToCheck.length * tenant.monthlyRent;
 
-  // Calculate total paid amount
   const totalPaid = (tenant.rentHistory || []).reduce((sum, rh) => {
-    if (rh.status === "Paid") {
-      return sum + rh.amount;
-    }
-    return sum;
+    return rh.status === "Paid" ? sum + (rh.amount || 0) : sum;
   }, 0);
 
   // Calculate due and overpaid
@@ -86,9 +77,7 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   let dueAmountDate = null;
   if (due > 0 && monthsToCheck.length > 0) {
     const lastMonth = monthsToCheck[monthsToCheck.length - 1];
-    const dueDate = new Date(
-      Date.UTC(lastMonth.year, lastMonth.month - 1, tenant.dueDate, 0, 0, 0, 0)
-    );
+    const dueDate = new Date(Date.UTC(lastMonth.year, lastMonth.month - 1, tenant.dueDate));
     dueAmountDate = dueDate.toISOString();
   }
 
