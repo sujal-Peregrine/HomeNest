@@ -30,8 +30,6 @@ const tenantSchema = z.object({
     uploadedAt: z.date().default(() => new Date())
   })).optional(),
   rentHistory: z.array(z.object({
-    month: z.number().min(1).max(12),
-    year: z.number(),
     amount: z.number().min(0),
     paidAt: z.date().default(() => new Date()),
     status: z.enum(["Paid", "Due"]).default("Paid")
@@ -40,14 +38,14 @@ const tenantSchema = z.object({
 
 // Function to calculate tenant status, due, and overpaid amounts
 function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
-  // If tenant has no unit assigned, return Vacant status
+  // If tenant has no unit assigned, return Unassigned status
   if (!tenant.unitId) {
-    return { status: "Unassigned", due: 0, overpaid: 0 };
+    return { status: "Unassigned", due: 0, overpaid: 0, dueAmountDate: null };
   }
 
   // If tenant has no startingDate, dueDate, or monthlyRent, return Due status
   if (!tenant.startingDate || !tenant.dueDate || !tenant.monthlyRent) {
-    return { status: "Due", due: 0, overpaid: 0 };
+    return { status: "Due", due: 0, overpaid: 0, dueAmountDate: null };
   }
 
   const start = new Date(tenant.startingDate);
@@ -95,11 +93,8 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   // Calculate dueAmountDate if there is a due amount
   let dueAmountDate = null;
   if (due > 0 && monthsToCheck.length > 0) {
-    // Get the most recent month to check
     const lastMonth = monthsToCheck[monthsToCheck.length - 1];
-    // Create a Date object in UTC for the due date in the most recent month
     const dueDate = new Date(Date.UTC(lastMonth.year, lastMonth.month - 1, tenant.dueDate, 0, 0, 0, 0));
-    // Format as ISO 8601 (e.g., 2025-09-05T00:00:00.000Z)
     dueAmountDate = dueDate.toISOString();
   }
 
@@ -641,33 +636,30 @@ export default async function routes(app) {
   app.post("/rent/:id", async (req, reply) => {
     try {
       const landlordId = req.user.sub;
-      const { month, year, amount } = z.object({
-        month: z.number().min(1).max(12),
-        year: z.number(),
-        amount: z.number().min(0)
+      const { amount, transactionDate } = z.object({
+        amount: z.number().min(0),
+        transactionDate: z.string().datetime().optional()
       }).parse(req.body);
-
+  
       const tenant = await Tenant.findOne({ _id: req.params.id, landlordId });
       if (!tenant) return reply.code(404).send({ success: false, message: "Tenant not found" });
-
+  
       tenant.rentHistory.push({
-        month,
-        year,
         amount,
         status: "Paid",
-        paidAt: new Date()
+        paidAt: transactionDate ? new Date(transactionDate) : new Date()
       });
       await tenant.save();
-
+  
       const populatedTenant = await Tenant.findOne({ _id: req.params.id, landlordId })
         .populate("propertyId", "name address")
         .populate("unitId");
-
-      const { status, due, overpaid ,dueAmountDate} = calculateTenantStatusAndDue(populatedTenant);
+  
+      const { status, due, overpaid, dueAmountDate } = calculateTenantStatusAndDue(populatedTenant);
       return reply.send({
         success: true,
         message: "Rent payment recorded successfully",
-        tenant: { ...populatedTenant.toObject(), status, due, overpaid ,dueAmountDate}
+        tenant: { ...populatedTenant.toObject(), status, due, overpaid, dueAmountDate }
       });
     } catch (err) {
       return reply.code(400).send({
@@ -676,7 +668,6 @@ export default async function routes(app) {
       });
     }
   });
-
   // ✅ Remove Rent Payment
   app.delete("/:id/rent/:month/:year", async (req, reply) => {
     try {

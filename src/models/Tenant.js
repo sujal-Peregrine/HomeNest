@@ -9,8 +9,6 @@ const Document = new Schema({
 }, { _id: false });
 
 const RentHistory = new Schema({
-  month: { type: Number, required: true }, // 1-12
-  year: { type: Number, required: true },
   amount: { type: Number, required: true },
   paidAt: { type: Date, default: Date.now },
   status: { type: String, enum: ["Paid", "Due"], default: "Paid" }

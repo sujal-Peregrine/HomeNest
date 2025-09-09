@@ -31,8 +31,7 @@ export default async function routes(app) {
         .select("unitId monthlyRent startingDate endingDate dueDate rentHistory");
 
       let totalRentCollected = 0;
-      let totalDue = 0;
-      let overpaid = 0;
+      let totalExpectedRent = 0;
 
       // Calculate rent for each tenant
       for (const tenant of tenants) {
@@ -45,44 +44,38 @@ export default async function routes(app) {
         const start = new Date(tenant.startingDate);
         const end = tenant.endingDate ? new Date(tenant.endingDate) : currentDate;
 
-        // Generate all months from start to end date or current date
+        // Use only the most recent month for expected rent
         const monthsToCheck = [];
-        let current = new Date(start.getFullYear(), start.getMonth(), 1);
-        
-        while (current <= end && current <= currentDate) {
-          // Exclude current month if before dueDate
-          if (
-            current.getFullYear() === currentDate.getFullYear() &&
-            current.getMonth() === currentDate.getMonth() &&
-            currentDate.getDate() < tenant.dueDate
-          ) {
-            break;
-          }
+        let current = new Date(end.getFullYear(), end.getMonth(), 1);
+        if (
+          current.getFullYear() === currentDate.getFullYear() &&
+          current.getMonth() === currentDate.getMonth() &&
+          currentDate.getDate() < tenant.dueDate
+        ) {
+          current.setMonth(current.getMonth() - 1); // Use previous month if before due date
+        }
+        if (current >= start) {
           monthsToCheck.push({
             month: current.getMonth() + 1,
             year: current.getFullYear()
           });
-          current.setMonth(current.getMonth() + 1);
         }
 
-        // Calculate total expected rent
-        const totalExpectedRent = monthsToCheck.length * tenant.monthlyRent;
+        // Calculate total expected rent for this tenant
+        const tenantExpectedRent = monthsToCheck.length * tenant.monthlyRent;
+        totalExpectedRent += tenantExpectedRent;
 
         // Sum all paid amounts from rentHistory
         const paidAmount = tenant.rentHistory.reduce((sum, rh) => {
           return rh.status === "Paid" ? sum + rh.amount : sum;
         }, 0);
-
         totalRentCollected += paidAmount;
-
-        // Calculate due or overpaid for this tenant
-        const tenantBalance = totalExpectedRent - paidAmount;
-        if (tenantBalance > 0) {
-          totalDue += tenantBalance; // Underpayment
-        } else {
-          overpaid += Math.abs(tenantBalance); // Overpayment
-        }
       }
+
+      // Calculate total due and overpaid based on net balance
+      const netBalance = totalExpectedRent - totalRentCollected;
+      const totalDue = netBalance > 0 ? netBalance : 0;
+      const overpaid = netBalance < 0 ? Math.abs(netBalance) : 0;
 
       return reply.send({
         success: true,
