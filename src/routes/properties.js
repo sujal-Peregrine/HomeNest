@@ -29,6 +29,71 @@ function floorName(i) {
   if (i === 3) return "3rd Floor";
   return `${i}th Floor`;
 }
+function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
+  // If tenant has no unit assigned, return Unassigned status
+  if (!tenant.unitId) {
+    return { status: "Unassigned", due: 0, overpaid: 0, dueAmountDate: null };
+  }
+
+  // If tenant has no startingDate, dueDate, or monthlyRent, return Due status
+  if (!tenant.startingDate || !tenant.dueDate || !tenant.monthlyRent) {
+    return { status: "Due", due: 0, overpaid: 0, dueAmountDate: null };
+  }
+
+  const start = new Date(tenant.startingDate);
+  const end = tenant.endingDate ? new Date(tenant.endingDate) : currentDate;
+
+  // Generate all months from start to current date or end date
+  const monthsToCheck = [];
+  let current = new Date(start.getFullYear(), start.getMonth(), 1);
+
+  while (current <= end && current <= currentDate) {
+    // Exclude current month if before dueDate
+    if (
+      current.getFullYear() === currentDate.getFullYear() &&
+      current.getMonth() === currentDate.getMonth() &&
+      currentDate.getDate() < tenant.dueDate
+    ) {
+      break;
+    }
+    monthsToCheck.push({
+      month: current.getMonth() + 1,
+      year: current.getFullYear(),
+    });
+    current.setMonth(current.getMonth() + 1);
+  }
+
+  // Calculate total expected rent
+  const totalExpectedRent = monthsToCheck.length * tenant.monthlyRent;
+
+  // Calculate total paid amount
+  const totalPaid = (tenant.rentHistory || []).reduce((sum, rh) => {
+    if (rh.status === "Paid") {
+      return sum + rh.amount;
+    }
+    return sum;
+  }, 0);
+
+  // Calculate due and overpaid
+  const tenantBalance = totalExpectedRent - totalPaid;
+  const due = tenantBalance > 0 ? tenantBalance : 0;
+  const overpaid = tenantBalance < 0 ? Math.abs(tenantBalance) : 0;
+
+  // Status is "Due" if due > 0, otherwise "Active"
+  const status = due > 0 ? "Due" : "Active";
+
+  // Calculate dueAmountDate if there is a due amount
+  let dueAmountDate = null;
+  if (due > 0 && monthsToCheck.length > 0) {
+    const lastMonth = monthsToCheck[monthsToCheck.length - 1];
+    const dueDate = new Date(
+      Date.UTC(lastMonth.year, lastMonth.month - 1, tenant.dueDate, 0, 0, 0, 0)
+    );
+    dueAmountDate = dueDate.toISOString();
+  }
+
+  return { status, due, overpaid, dueAmountDate, totalPaid };
+}
 export default async function routes(app) {
   app.addHook("preHandler", app.auth);
   // ✅ Create Property
@@ -240,22 +305,21 @@ export default async function routes(app) {
     try {
       const landlordId = req.user.sub;
       const currentDate = new Date();
-
-      // Parse query parameters for pagination
+  
+      // Parse query parameters
       const querySchema = z.object({
         page: z.string().regex(/^\d+$/).default("1").transform(Number),
         limit: z.string().regex(/^\d+$/).default("10").transform(Number)
       });
       const { page, limit } = querySchema.parse(req.query);
-
-      // Fetch properties with pagination
+  
       const skip = (page - 1) * limit;
       const properties = await Property.find({ landlordId })
-        .select('_id name totalUnits totalVacant totalOccupied')
+        .select("_id name totalUnits totalVacant totalOccupied")
         .skip(skip)
         .limit(limit)
         .sort({ createdAt: -1 });
-
+  
       if (!properties.length && page === 1) {
         return reply.send({
           success: true,
@@ -268,89 +332,37 @@ export default async function routes(app) {
           }
         });
       }
-
-      // Get total count of properties for pagination
+  
       const totalProperties = await Property.countDocuments({ landlordId });
-
-      // Fetch all tenants for the landlord's properties
       const propertyIds = properties.map(p => new mongoose.Types.ObjectId(p._id));
+  
       const tenants = await Tenant.find({
         landlordId: new mongoose.Types.ObjectId(landlordId),
         propertyId: { $in: propertyIds }
       }).select("propertyId unitId monthlyRent startingDate endingDate dueDate rentHistory");
-
-      // Calculate tenant counts per property
+  
+      // Tenant counts per property
       const tenantCounts = await Tenant.aggregate([
-        {
-          $match: {
-            landlordId: new mongoose.Types.ObjectId(landlordId),
-            propertyId: { $in: propertyIds }
-          }
-        },
-        {
-          $group: {
-            _id: "$propertyId",
-            totalTenants: { $sum: 1 }
-          }
-        }
+        { $match: { landlordId: new mongoose.Types.ObjectId(landlordId), propertyId: { $in: propertyIds } } },
+        { $group: { _id: "$propertyId", totalTenants: { $sum: 1 } } }
       ]);
-      const tenantCountMap = Object.fromEntries(
-        tenantCounts.map(t => [t._id.toString(), t.totalTenants])
-      );
-
-      // Calculate rent collected, due, and overpaid per property
+      const tenantCountMap = Object.fromEntries(tenantCounts.map(t => [t._id.toString(), t.totalTenants]));
+  
+      // ✅ Per-property rent aggregation (fixed)
       const rentMap = {};
       for (const tenant of tenants) {
-        // Skip tenants without an assigned unit
         if (!tenant.unitId) continue;
-
         const propId = tenant.propertyId.toString();
         if (!rentMap[propId]) {
-          rentMap[propId] = { collected: 0, expected: 0 };
+          rentMap[propId] = { collected: 0, due: 0, overpaid: 0 };
         }
-
-        // Skip tenants without required rent calculation fields
-        if (!tenant.startingDate || !tenant.monthlyRent || !tenant.dueDate) continue;
-
-        const start = new Date(tenant.startingDate);
-        const end = tenant.endingDate ? new Date(tenant.endingDate) : currentDate;
-
-        // Use only the most recent month for expected rent
-        const monthsToCheck = [];
-        let current = new Date(end.getFullYear(), end.getMonth(), 1);
-        if (
-          current.getFullYear() === currentDate.getFullYear() &&
-          current.getMonth() === currentDate.getMonth() &&
-          currentDate.getDate() < tenant.dueDate
-        ) {
-          current.setMonth(current.getMonth() - 1); // Use previous month if before due date
-        }
-        if (current >= start) {
-          monthsToCheck.push({
-            month: current.getMonth() + 1,
-            year: current.getFullYear()
-          });
-        }
-
-        // Calculate total expected rent for this tenant
-        const tenantExpectedRent = monthsToCheck.length * tenant.monthlyRent;
-        rentMap[propId].expected += tenantExpectedRent;
-
-        // Sum all paid amounts from rentHistory
-        const paidAmount = tenant.rentHistory.reduce((sum, rh) => {
-          return rh.status === "Paid" ? sum + rh.amount : sum;
-        }, 0);
-        rentMap[propId].collected += paidAmount;
+  
+        const { due, overpaid, totalPaid } = calculateTenantStatusAndDue(tenant, currentDate);
+        rentMap[propId].collected += totalPaid;
+        rentMap[propId].due += due;
+        rentMap[propId].overpaid += overpaid;
       }
-
-      // Calculate due and overpaid for each property
-      for (const propId in rentMap) {
-        const netBalance = rentMap[propId].expected - rentMap[propId].collected;
-        rentMap[propId].due = netBalance > 0 ? netBalance : 0;
-        rentMap[propId].overpaid = netBalance < 0 ? Math.abs(netBalance) : 0;
-      }
-
-      // Construct overview data
+  
       const overviewData = properties.map(p => ({
         propertyId: p._id,
         propertyName: p.name,
@@ -362,7 +374,7 @@ export default async function routes(app) {
         totalDue: rentMap[p._id.toString()]?.due || 0,
         overpaid: rentMap[p._id.toString()]?.overpaid || 0
       }));
-
+  
       return reply.send({
         success: true,
         data: overviewData,
@@ -377,4 +389,6 @@ export default async function routes(app) {
       return reply.code(500).send({ success: false, message: err.message });
     }
   });
+  
+
 }
