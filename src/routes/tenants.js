@@ -42,7 +42,7 @@ const tenantSchema = z.object({
 function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   // If tenant has no unit assigned, return Vacant status
   if (!tenant.unitId) {
-    return { status: "Vacant", due: 0, overpaid: 0 };
+    return { status: "Unassigned", due: 0, overpaid: 0 };
   }
 
   // If tenant has no startingDate, dueDate, or monthlyRent, return Due status
