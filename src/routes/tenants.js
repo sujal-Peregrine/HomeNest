@@ -68,7 +68,7 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
     }
     monthsToCheck.push({
       month: current.getMonth() + 1,
-      year: current.getFullYear()
+      year: current.getFullYear(),
     });
     current.setMonth(current.getMonth() + 1);
   }
@@ -92,7 +92,18 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   // Status is "Due" if due > 0, otherwise "Active"
   const status = due > 0 ? "Due" : "Active";
 
-  return { status, due, overpaid };
+  // Calculate dueAmountDate if there is a due amount
+  let dueAmountDate = null;
+  if (due > 0 && monthsToCheck.length > 0) {
+    // Get the most recent month to check
+    const lastMonth = monthsToCheck[monthsToCheck.length - 1];
+    // Create a Date object in UTC for the due date in the most recent month
+    const dueDate = new Date(Date.UTC(lastMonth.year, lastMonth.month - 1, tenant.dueDate, 0, 0, 0, 0));
+    // Format as ISO 8601 (e.g., 2025-09-05T00:00:00.000Z)
+    dueAmountDate = dueDate.toISOString();
+  }
+
+  return { status, due, overpaid, dueAmountDate };
 }
 
 async function updateFloorCounts(propertyId, floorId, landlordId) {
@@ -237,7 +248,7 @@ export default async function routes(app) {
         await updatePropertyUnitCount(body.propertyId, landlordId);
       }
 
-      const { status, due, overpaid } = calculateTenantStatusAndDue(tenant);
+      const { status, due, overpaid ,dueAmountDate} = calculateTenantStatusAndDue(tenant);
       return reply.code(201).send({
         success: true,
         message: "Tenant created successfully",
@@ -246,6 +257,7 @@ export default async function routes(app) {
           status,
           due,
           overpaid,
+          dueAmountDate,
           property,
           unit
         }
@@ -411,11 +423,11 @@ export default async function routes(app) {
         }
       }
 
-      const { status, due, overpaid } = calculateTenantStatusAndDue(populatedTenant);
+      const { status, due, overpaid, dueAmountDate } = calculateTenantStatusAndDue(populatedTenant);
       return reply.send({
         success: true,
         message: "Tenant updated successfully",
-        tenant: { ...populatedTenant.toObject(), status, due, overpaid }
+        tenant: { ...populatedTenant.toObject(), status, due, overpaid ,dueAmountDate }
       });
     } catch (err) {
       return reply.code(400).send({
@@ -479,8 +491,8 @@ export default async function routes(app) {
   
       // Enrich tenants manually
       const enrichedTenants = tenants.map(t => {
-        const { status, due, overpaid } = calculateTenantStatusAndDue(t);
-        return { ...t.toObject(), status, due, overpaid };
+        const { status, due, overpaid , dueAmountDate} = calculateTenantStatusAndDue(t);
+        return { ...t.toObject(), status, due, overpaid ,dueAmountDate };
       });
   
       return reply.send({
@@ -560,10 +572,10 @@ export default async function routes(app) {
       .populate("unitId");
     if (!tenant) return reply.code(404).send({ success: false, message: "Tenant not found" });
 
-    const { status, due, overpaid } = calculateTenantStatusAndDue(tenant);
+    const { status, due, overpaid ,dueAmountDate} = calculateTenantStatusAndDue(tenant);
     return reply.send({
       success: true,
-      tenant: { ...tenant.toObject(), status, due, overpaid }
+      tenant: { ...tenant.toObject(), status, due, overpaid, dueAmountDate }
     });
   });
 
@@ -574,10 +586,11 @@ export default async function routes(app) {
       const tenant = await Tenant.findOne({ _id: req.params.id, landlordId });
       if (!tenant) return reply.code(404).send({ success: false, message: "Tenant not found" });
 
-      const { due, overpaid } = calculateTenantStatusAndDue(tenant);
+      const { due, overpaid,dueAmountDate } = calculateTenantStatusAndDue(tenant);
       return reply.send({
         success: true,
         due,
+        dueAmountDate,
         overpaid
       });
     } catch (err) {
@@ -598,10 +611,10 @@ export default async function routes(app) {
     tenant.documents.push({ type, fileUrl, fileName, uploadedAt: new Date() });
     await tenant.save();
 
-    const { status, due, overpaid } = calculateTenantStatusAndDue(tenant);
+    const { status, due, overpaid, dueAmountDate } = calculateTenantStatusAndDue(tenant);
     return reply.send({
       success: true,
-      tenant: { ...tenant.toObject(), status, due, overpaid }
+      tenant: { ...tenant.toObject(), status, due, overpaid, dueAmountDate }
     });
   });
 
@@ -617,10 +630,10 @@ export default async function routes(app) {
     tenant.documents.splice(idx, 1);
     await tenant.save();
 
-    const { status, due, overpaid } = calculateTenantStatusAndDue(tenant);
+    const { status, due, overpaid, dueAmountDate } = calculateTenantStatusAndDue(tenant);
     return reply.send({
       success: true,
-      tenant: { ...tenant.toObject(), status, due, overpaid }
+      tenant: { ...tenant.toObject(), status, due, overpaid ,dueAmountDate}
     });
   });
 
@@ -650,11 +663,11 @@ export default async function routes(app) {
         .populate("propertyId", "name address")
         .populate("unitId");
 
-      const { status, due, overpaid } = calculateTenantStatusAndDue(populatedTenant);
+      const { status, due, overpaid ,dueAmountDate} = calculateTenantStatusAndDue(populatedTenant);
       return reply.send({
         success: true,
         message: "Rent payment recorded successfully",
-        tenant: { ...populatedTenant.toObject(), status, due, overpaid }
+        tenant: { ...populatedTenant.toObject(), status, due, overpaid ,dueAmountDate}
       });
     } catch (err) {
       return reply.code(400).send({
