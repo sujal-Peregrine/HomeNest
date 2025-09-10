@@ -4,14 +4,15 @@ import Property from "../models/Property.js";
 import Unit from "../models/Unit.js";
 import Floor from "../models/Floor.js";
 import mongoose from "mongoose";
+import { nullable } from "zod/v4";
 
 const tenantSchema = z.object({
   name: z.string().min(2, "Name is required"),
   phone: z.string().regex(/^\d{10,15}$/, "Phone number must be 10–15 digits"),
   email: z.string().email("Invalid email address").transform(e => e.toLowerCase()).optional(),
   photoUrl: z.string().url().optional(),
-  propertyId: z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid property ID").optional(),
-  unitId: z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid unit ID").optional(),
+  propertyId: z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid property ID").optional().nullable(),
+  unitId: z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid unit ID").nullable().optional(), 
   monthlyRent: z.number().min(0).optional(),
   dueDate: z.number({
     required_error: "Due date is required",
