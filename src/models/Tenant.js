@@ -11,7 +11,7 @@ const Document = new Schema({
 const RentHistory = new Schema({
   amount: { type: Number, required: true },
   paidAt: { type: Date, default: Date.now },
-  status: { type: String, enum: ["Paid", "Due"], default: "Paid" }
+  status: { type: String, enum: ["Paid"], default: "Paid" } 
 }, { _id: false });
 
 const TenantSchema = new Schema(
@@ -29,7 +29,7 @@ const TenantSchema = new Schema(
       lowercase: true, 
       trim: true, 
       match: [/.+@.+\..+/, "Invalid email address"],
-      optional: true
+      sparse: true // Allows null/undefined values without requiring uniqueness
     },
     photoUrl: String,
     propertyId: { type: Types.ObjectId, ref: "properties", required: false },
@@ -40,7 +40,10 @@ const TenantSchema = new Schema(
     endingDate: { type: Date, default: null },
     depositMoney: { type: Number, default: 0 },
     documents: [Document],
-    rentHistory: [RentHistory]
+    rentHistory: [RentHistory],
+    electricityPerUnit: { type: Number, default: 0 }, // Cost per electricity unit
+    startingUnit: { type: Number, default: 0 }, // Initial electricity meter reading
+    currentUnit: { type: Number, default: 0 } // Current electricity meter reading
   },
   { timestamps: true }
 );

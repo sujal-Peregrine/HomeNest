@@ -6,11 +6,12 @@ import mongoose from "mongoose";
 function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   // If tenant has no unit assigned, return Unassigned status
   if (!tenant.unitId) {
-    return { status: "Unassigned", due: 0, overpaid: 0, dueAmountDate: null, totalPaid: 0 };
+    return { status: "Unassigned", due: 0, overpaid: 0, dueAmountDate: null, totalPaid: 0, totalExpectedRent: 0, totalElectricityCost: 0 };
   }
 
+  // If tenant has no startingDate, dueDate, or monthlyRent, return Due status
   if (!tenant.startingDate || !tenant.dueDate || !tenant.monthlyRent) {
-    return { status: "Due", due: 0, overpaid: 0, dueAmountDate: null, totalPaid: 0 };
+    return { status: "Due", due: 0, overpaid: 0, dueAmountDate: null, totalPaid: 0, totalExpectedRent: 0, totalElectricityCost: 0 };
   }
 
   const start = new Date(tenant.startingDate);
@@ -36,12 +37,26 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   // Calculate total expected rent
   const totalExpectedRent = monthsToCheck.length * tenant.monthlyRent;
 
+  // Calculate total electricity cost
+  let totalElectricityCost = 0;
+  if (
+    tenant.electricityPerUnit != null &&
+    tenant.startingUnit != null &&
+    tenant.currentUnit != null &&
+    tenant.currentUnit >= tenant.startingUnit
+  ) {
+    totalElectricityCost = (tenant.currentUnit - tenant.startingUnit) * tenant.electricityPerUnit;
+  }
+
+  const totalExpected = totalExpectedRent + totalElectricityCost;
+
+  // Calculate total paid amount
   const totalPaid = (tenant.rentHistory || []).reduce((sum, rh) => {
-    return rh.status === "Paid" ? sum + (rh.amount || 0) : sum;
+    return sum + (rh.amount || 0); // All entries are "Paid"
   }, 0);
 
   // Calculate due and overpaid
-  const tenantBalance = totalExpectedRent - totalPaid;
+  const tenantBalance = totalExpected - totalPaid;
   const due = tenantBalance > 0 ? tenantBalance : 0;
   const overpaid = tenantBalance < 0 ? Math.abs(tenantBalance) : 0;
 
@@ -56,7 +71,7 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
     dueAmountDate = dueDate.toISOString();
   }
 
-  return { status, due, overpaid, dueAmountDate, totalPaid };
+  return { status, due, overpaid, dueAmountDate, totalPaid, totalExpectedRent, totalElectricityCost };
 }
 
 export default async function routes(app) {
@@ -84,18 +99,29 @@ export default async function routes(app) {
 
       // Fetch all tenants for the landlord
       const tenants = await Tenant.find({ landlordId })
-        .select("unitId monthlyRent startingDate endingDate dueDate rentHistory");
+        .select("unitId monthlyRent startingDate endingDate dueDate rentHistory electricityPerUnit startingUnit currentUnit");
 
       let totalRentCollected = 0;
       let totalDue = 0;
       let totalOverpaid = 0;
+      let totalExpectedRent = 0;
+      let totalExpectedElectricity = 0;
 
-      // Calculate rent for each tenant
+      // Calculate rent and electricity for each tenant
       for (const tenant of tenants) {
-        const { due, overpaid, totalPaid } = calculateTenantStatusAndDue(tenant, currentDate);
+        const {
+          due,
+          overpaid,
+          totalPaid,
+          totalExpectedRent: tenantExpectedRent,   
+          totalElectricityCost
+        } = calculateTenantStatusAndDue(tenant, currentDate);
+      
         totalRentCollected += totalPaid;
         totalDue += due;
         totalOverpaid += overpaid;
+        totalExpectedRent += tenantExpectedRent;  
+        totalExpectedElectricity += totalElectricityCost;
       }
 
       return reply.send({
@@ -106,11 +132,16 @@ export default async function routes(app) {
           totalVacant: props.totalVacant,
           totalRentCollected,
           totalDue,
-          overpaid: totalOverpaid
+          totalOverpaid,
+          totalExpectedRent,
+          totalExpectedElectricity
         }
       });
     } catch (err) {
-      return reply.code(500).send({ success: false, message: err.message });
+      return reply.code(500).send({
+        success: false,
+        message: err.message
+      });
     }
   });
 }

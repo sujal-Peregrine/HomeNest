@@ -33,8 +33,11 @@ const tenantSchema = z.object({
   rentHistory: z.array(z.object({
     amount: z.number().min(0),
     paidAt: z.date().default(() => new Date()),
-    status: z.enum(["Paid", "Due"]).default("Paid")
-  })).optional()
+    status: z.enum(["Paid"]).default("Paid") // Updated to match schema
+  })).optional(),
+  electricityPerUnit: z.number().min(0).optional(),
+  startingUnit: z.number().min(0).optional(),
+  currentUnit: z.number().min(0).optional()
 });
 
 // Function to calculate tenant status, due, and overpaid amounts
@@ -73,18 +76,28 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   }
 
   // Calculate total expected rent
-  const totalExpectedRent = monthsToCheck.length * tenant.monthlyRent;
+  let totalExpectedRent = monthsToCheck.length * tenant.monthlyRent;
+
+  // Calculate total electricity cost
+  let totalElectricityCost = 0;
+  if (
+    tenant.electricityPerUnit &&
+    tenant.startingUnit !== undefined &&
+    tenant.currentUnit !== undefined &&
+    tenant.currentUnit >= tenant.startingUnit
+  ) {
+    totalElectricityCost = (tenant.currentUnit - tenant.startingUnit) * tenant.electricityPerUnit;
+  }
+
+  const totalExpected = totalExpectedRent + totalElectricityCost;
 
   // Calculate total paid amount
   const totalPaid = tenant.rentHistory.reduce((sum, rh) => {
-    if (rh.status === "Paid") {
-      return sum + rh.amount;
-    }
-    return sum;
+    return sum + rh.amount; // All entries are "Paid"
   }, 0);
 
   // Calculate due and overpaid
-  const tenantBalance = totalExpectedRent - totalPaid;
+  const tenantBalance = totalExpected - totalPaid;
   const due = tenantBalance > 0 ? tenantBalance : 0;
   const overpaid = tenantBalance < 0 ? Math.abs(tenantBalance) : 0;
 
@@ -236,7 +249,8 @@ export default async function routes(app) {
       // Create tenant
       const tenant = await Tenant.create({
         landlordId,
-        ...body
+        ...body,
+        currentUnit: body.startingUnit || 0
       });
 
       if (floorId && body.propertyId) {
@@ -244,7 +258,7 @@ export default async function routes(app) {
         await updatePropertyUnitCount(body.propertyId, landlordId);
       }
 
-      const { status, due, overpaid ,dueAmountDate} = calculateTenantStatusAndDue(tenant);
+      const { status, due, overpaid, dueAmountDate } = calculateTenantStatusAndDue(tenant);
       return reply.code(201).send({
         success: true,
         message: "Tenant created successfully",
@@ -273,6 +287,11 @@ export default async function routes(app) {
       const body = tenantSchema.partial().parse(req.body);
       const tenant = await Tenant.findOne({ _id: req.params.id, landlordId });
       if (!tenant) return reply.code(404).send({ success: false, message: "Tenant not found" });
+
+      // Prevent manual update of currentUnit
+      if ("currentUnit" in body) {
+        delete body.currentUnit;
+      }
 
       const oldPropertyId = tenant.propertyId ? tenant.propertyId.toString() : null;
       let targetPropertyId = oldPropertyId;
@@ -396,6 +415,11 @@ export default async function routes(app) {
         body.unitId = null;
       }
 
+      // If updating startingUnit and currentUnit not set yet, sync it
+      if (body.startingUnit !== undefined && tenant.currentUnit === undefined) {
+        tenant.currentUnit = body.startingUnit;
+      }
+
       Object.assign(tenant, body);
       await tenant.save();
 
@@ -423,7 +447,7 @@ export default async function routes(app) {
       return reply.send({
         success: true,
         message: "Tenant updated successfully",
-        tenant: { ...populatedTenant.toObject(), status, due, overpaid ,dueAmountDate }
+        tenant: { ...populatedTenant.toObject(), status, due, overpaid, dueAmountDate }
       });
     } catch (err) {
       return reply.code(400).send({
@@ -487,8 +511,8 @@ export default async function routes(app) {
   
       // Enrich tenants manually
       const enrichedTenants = tenants.map(t => {
-        const { status, due, overpaid , dueAmountDate} = calculateTenantStatusAndDue(t);
-        return { ...t.toObject(), status, due, overpaid ,dueAmountDate };
+        const { status, due, overpaid, dueAmountDate } = calculateTenantStatusAndDue(t);
+        return { ...t.toObject(), status, due, overpaid, dueAmountDate };
       });
   
       return reply.send({
@@ -568,7 +592,7 @@ export default async function routes(app) {
       .populate("unitId");
     if (!tenant) return reply.code(404).send({ success: false, message: "Tenant not found" });
 
-    const { status, due, overpaid ,dueAmountDate} = calculateTenantStatusAndDue(tenant);
+    const { status, due, overpaid, dueAmountDate } = calculateTenantStatusAndDue(tenant);
     return reply.send({
       success: true,
       tenant: { ...tenant.toObject(), status, due, overpaid, dueAmountDate }
@@ -582,7 +606,7 @@ export default async function routes(app) {
       const tenant = await Tenant.findOne({ _id: req.params.id, landlordId });
       if (!tenant) return reply.code(404).send({ success: false, message: "Tenant not found" });
 
-      const { due, overpaid,dueAmountDate } = calculateTenantStatusAndDue(tenant);
+      const { due, overpaid, dueAmountDate } = calculateTenantStatusAndDue(tenant);
       return reply.send({
         success: true,
         due,
@@ -629,7 +653,7 @@ export default async function routes(app) {
     const { status, due, overpaid, dueAmountDate } = calculateTenantStatusAndDue(tenant);
     return reply.send({
       success: true,
-      tenant: { ...tenant.toObject(), status, due, overpaid ,dueAmountDate}
+      tenant: { ...tenant.toObject(), status, due, overpaid, dueAmountDate }
     });
   });
 
@@ -637,13 +661,28 @@ export default async function routes(app) {
   app.post("/rent/:id", async (req, reply) => {
     try {
       const landlordId = req.user.sub;
-      const { amount, transactionDate } = z.object({
+      const { amount, transactionDate, currentElectricityUnit } = z.object({
         amount: z.number().min(0),
-        transactionDate: z.string().datetime().optional()
+        transactionDate: z.string().datetime().optional(),
+        currentElectricityUnit: z.number().min(0).optional()
       }).parse(req.body);
   
       const tenant = await Tenant.findOne({ _id: req.params.id, landlordId });
       if (!tenant) return reply.code(404).send({ success: false, message: "Tenant not found" });
+  
+      // Handle electricity unit update if provided
+      if (currentElectricityUnit !== undefined) {
+        if (tenant.electricityPerUnit !== undefined && tenant.startingUnit !== undefined) {
+          tenant.currentUnit = tenant.currentUnit ?? tenant.startingUnit;
+          if (currentElectricityUnit < tenant.currentUnit) {
+            return reply.code(400).send({
+              success: false,
+              message: "Current electricity unit cannot be less than last reading"
+            });
+          }
+          tenant.currentUnit = currentElectricityUnit;
+        }
+      }
   
       tenant.rentHistory.push({
         amount,
@@ -661,51 +700,6 @@ export default async function routes(app) {
         success: true,
         message: "Rent payment recorded successfully",
         tenant: { ...populatedTenant.toObject(), status, due, overpaid, dueAmountDate }
-      });
-    } catch (err) {
-      return reply.code(400).send({
-        success: false,
-        message: err.message
-      });
-    }
-  });
-  // ✅ Remove Rent Payment
-  app.delete("/:id/rent/:month/:year", async (req, reply) => {
-    try {
-      const landlordId = req.user.sub;
-      const { month, year } = z.object({
-        month: z.number().min(1).max(12),
-        year: z.number()
-      }).parse({
-        month: parseInt(req.params.month),
-        year: parseInt(req.params.year)
-      });
-
-      const tenant = await Tenant.findOne({ _id: req.params.id, landlordId });
-      if (!tenant) return reply.code(404).send({ success: false, message: "Tenant not found" });
-
-      const paymentIndex = tenant.rentHistory.findIndex(
-        rh => rh.month === month && rh.year === year
-      );
-      if (paymentIndex === -1) {
-        return reply.code(404).send({
-          success: false,
-          message: `No payment found for ${month}/${year}`
-        });
-      }
-
-      tenant.rentHistory.splice(paymentIndex, 1);
-      await tenant.save();
-
-      const populatedTenant = await Tenant.findOne({ _id: req.params.id, landlordId })
-        .populate("propertyId", "name address")
-        .populate("unitId");
-
-      const { status, due, overpaid } = calculateTenantStatusAndDue(populatedTenant);
-      return reply.send({
-        success: true,
-        message: "Rent payment removed successfully",
-        tenant: { ...populatedTenant.toObject(), status, due, overpaid }
       });
     } catch (err) {
       return reply.code(400).send({
