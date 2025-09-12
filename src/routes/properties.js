@@ -32,11 +32,12 @@ function floorName(i) {
 function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   // If tenant has no unit assigned, return Unassigned status
   if (!tenant.unitId) {
-    return { status: "Unassigned", due: 0, overpaid: 0, dueAmountDate: null, totalPaid: 0 };
+    return { status: "Unassigned", due: 0, overpaid: 0, dueAmountDate: null, totalPaid: 0, totalExpectedRent: 0, totalElectricityCost: 0 };
   }
 
+  // If tenant has no startingDate, dueDate, or monthlyRent, return Due status
   if (!tenant.startingDate || !tenant.dueDate || !tenant.monthlyRent) {
-    return { status: "Due", due: 0, overpaid: 0, dueAmountDate: null, totalPaid: 0 };
+    return { status: "Due", due: 0, overpaid: 0, dueAmountDate: null, totalPaid: 0, totalExpectedRent: 0, totalElectricityCost: 0 };
   }
 
   const start = new Date(tenant.startingDate);
@@ -59,14 +60,29 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
     current.setMonth(current.getMonth() + 1);
   }
 
+  // Calculate total expected rent
   const totalExpectedRent = monthsToCheck.length * tenant.monthlyRent;
 
+  // Calculate total electricity cost
+  let totalElectricityCost = 0;
+  if (
+    tenant.electricityPerUnit != null &&
+    tenant.startingUnit != null &&
+    tenant.currentUnit != null &&
+    tenant.currentUnit >= tenant.startingUnit
+  ) {
+    totalElectricityCost = (tenant.currentUnit - tenant.startingUnit) * tenant.electricityPerUnit;
+  }
+
+  const totalExpected = totalExpectedRent + totalElectricityCost;
+
+  // Calculate total paid amount
   const totalPaid = (tenant.rentHistory || []).reduce((sum, rh) => {
-    return rh.status === "Paid" ? sum + (rh.amount || 0) : sum;
+    return sum + (rh.amount || 0); // All entries are "Paid"
   }, 0);
 
   // Calculate due and overpaid
-  const tenantBalance = totalExpectedRent - totalPaid;
+  const tenantBalance = totalExpected - totalPaid;
   const due = tenantBalance > 0 ? tenantBalance : 0;
   const overpaid = tenantBalance < 0 ? Math.abs(tenantBalance) : 0;
 
@@ -81,7 +97,7 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
     dueAmountDate = dueDate.toISOString();
   }
 
-  return { status, due, overpaid, dueAmountDate, totalPaid };
+  return { status, due, overpaid, dueAmountDate, totalPaid, totalExpectedRent, totalElectricityCost };
 }
 export default async function routes(app) {
   app.addHook("preHandler", app.auth);
@@ -135,7 +151,7 @@ export default async function routes(app) {
         limit: z.string().regex(/^\d+$/).default("10").transform(Number)
       });
       const { page, limit } = querySchema.parse(req.query);
-  
+
       const skip = (page - 1) * limit;
   
       // Fetch properties with pagination
@@ -294,21 +310,21 @@ export default async function routes(app) {
     try {
       const landlordId = req.user.sub;
       const currentDate = new Date();
-  
+
       // Parse query parameters
       const querySchema = z.object({
         page: z.string().regex(/^\d+$/).default("1").transform(Number),
         limit: z.string().regex(/^\d+$/).default("10").transform(Number)
       });
       const { page, limit } = querySchema.parse(req.query);
-  
+
       const skip = (page - 1) * limit;
       const properties = await Property.find({ landlordId })
         .select("_id name totalUnits totalVacant totalOccupied")
         .skip(skip)
         .limit(limit)
         .sort({ createdAt: -1 });
-  
+
       if (!properties.length && page === 1) {
         return reply.send({
           success: true,
@@ -321,37 +337,39 @@ export default async function routes(app) {
           }
         });
       }
-  
+
       const totalProperties = await Property.countDocuments({ landlordId });
       const propertyIds = properties.map(p => new mongoose.Types.ObjectId(p._id));
-  
+
       const tenants = await Tenant.find({
         landlordId: new mongoose.Types.ObjectId(landlordId),
         propertyId: { $in: propertyIds }
-      }).select("propertyId unitId monthlyRent startingDate endingDate dueDate rentHistory");
-  
+      }).select("propertyId unitId monthlyRent startingDate endingDate dueDate rentHistory electricityPerUnit startingUnit currentUnit");
+
       // Tenant counts per property
       const tenantCounts = await Tenant.aggregate([
         { $match: { landlordId: new mongoose.Types.ObjectId(landlordId), propertyId: { $in: propertyIds } } },
         { $group: { _id: "$propertyId", totalTenants: { $sum: 1 } } }
       ]);
       const tenantCountMap = Object.fromEntries(tenantCounts.map(t => [t._id.toString(), t.totalTenants]));
-  
+
       // ✅ Per-property rent aggregation (fixed)
       const rentMap = {};
       for (const tenant of tenants) {
         if (!tenant.unitId) continue;
         const propId = tenant.propertyId.toString();
         if (!rentMap[propId]) {
-          rentMap[propId] = { collected: 0, due: 0, overpaid: 0 };
+          rentMap[propId] = { collected: 0, due: 0, overpaid: 0, expectedRent: 0, expectedElectricity: 0 };
         }
-  
-        const { due, overpaid, totalPaid } = calculateTenantStatusAndDue(tenant, currentDate);
+
+        const { due, overpaid, totalPaid, totalExpectedRent, totalElectricityCost } = calculateTenantStatusAndDue(tenant, currentDate);
         rentMap[propId].collected += totalPaid;
         rentMap[propId].due += due;
         rentMap[propId].overpaid += overpaid;
+        rentMap[propId].expectedRent += totalExpectedRent;
+        rentMap[propId].expectedElectricity += totalElectricityCost;
       }
-  
+
       const overviewData = properties.map(p => ({
         propertyId: p._id,
         propertyName: p.name,
@@ -361,9 +379,11 @@ export default async function routes(app) {
         totalTenants: tenantCountMap[p._id.toString()] || 0,
         totalRentCollected: rentMap[p._id.toString()]?.collected || 0,
         totalDue: rentMap[p._id.toString()]?.due || 0,
-        overpaid: rentMap[p._id.toString()]?.overpaid || 0
+        totalOverpaid: rentMap[p._id.toString()]?.overpaid || 0,
+        totalExpectedRent: rentMap[p._id.toString()]?.expectedRent || 0,
+        totalExpectedElectricity: rentMap[p._id.toString()]?.expectedElectricity || 0
       }));
-  
+
       return reply.send({
         success: true,
         data: overviewData,
