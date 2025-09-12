@@ -3,14 +3,33 @@ import Property from "../models/Property.js";
 import Tenant from "../models/Tenant.js";
 import mongoose from "mongoose";
 
+// Function to get applicable rent for a specific month
+function getRentForMonth(year, month, rentChanges, defaultRent) {
+  // If no rent changes, use default rent
+  if (!rentChanges || rentChanges.length === 0) {
+    return defaultRent || 0;
+  }
+  // Rent changes must be sorted by effectiveFrom ASC
+  let applicableRent = rentChanges[0].amount;
+  for (const change of rentChanges) {
+    const effective = new Date(change.effectiveFrom);
+    if (effective <= new Date(year, month, 1)) {
+      applicableRent = change.amount;
+    } else {
+      break;
+    }
+  }
+  return applicableRent;
+}
+
 function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   // If tenant has no unit assigned, return Unassigned status
   if (!tenant.unitId) {
     return { status: "Unassigned", due: 0, overpaid: 0, dueAmountDate: null, totalPaid: 0, totalExpectedRent: 0, totalElectricityCost: 0 };
   }
 
-  // If tenant has no startingDate, dueDate, or monthlyRent, return Due status
-  if (!tenant.startingDate || !tenant.dueDate || !tenant.monthlyRent) {
+  // If tenant has no startingDate or dueDate, return Due status
+  if (!tenant.startingDate || !tenant.dueDate) {
     return { status: "Due", due: 0, overpaid: 0, dueAmountDate: null, totalPaid: 0, totalExpectedRent: 0, totalElectricityCost: 0 };
   }
 
@@ -35,7 +54,13 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   }
 
   // Calculate total expected rent
-  const totalExpectedRent = monthsToCheck.length * tenant.monthlyRent;
+  let totalExpectedRent = 0;
+  const rentChanges = (tenant.rentChanges || []).sort(
+    (a, b) => new Date(a.effectiveFrom) - new Date(b.effectiveFrom)
+  );
+  for (const m of monthsToCheck) {
+    totalExpectedRent += getRentForMonth(m.year, m.month - 1, rentChanges, tenant.monthlyRent);
+  }
 
   // Calculate total electricity cost
   let totalElectricityCost = 0;
@@ -99,7 +124,7 @@ export default async function routes(app) {
 
       // Fetch all tenants for the landlord
       const tenants = await Tenant.find({ landlordId })
-        .select("unitId monthlyRent startingDate endingDate dueDate rentHistory electricityPerUnit startingUnit currentUnit");
+        .select("unitId monthlyRent startingDate endingDate dueDate rentHistory electricityPerUnit startingUnit currentUnit rentChanges");
 
       let totalRentCollected = 0;
       let totalDue = 0;
@@ -113,14 +138,14 @@ export default async function routes(app) {
           due,
           overpaid,
           totalPaid,
-          totalExpectedRent: tenantExpectedRent,   
+          totalExpectedRent: tenantExpectedRent,
           totalElectricityCost
         } = calculateTenantStatusAndDue(tenant, currentDate);
-      
+
         totalRentCollected += totalPaid;
         totalDue += due;
         totalOverpaid += overpaid;
-        totalExpectedRent += tenantExpectedRent;  
+        totalExpectedRent += tenantExpectedRent;
         totalExpectedElectricity += totalElectricityCost;
       }
 

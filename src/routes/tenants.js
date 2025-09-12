@@ -12,7 +12,7 @@ const tenantSchema = z.object({
   email: z.string().email("Invalid email address").transform(e => e.toLowerCase()).optional(),
   photoUrl: z.string().url().optional(),
   propertyId: z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid property ID").optional().nullable(),
-  unitId: z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid unit ID").nullable().optional(), 
+  unitId: z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid unit ID").nullable().optional(),
   monthlyRent: z.number().min(0).optional(),
   dueDate: z.number({
     required_error: "Due date is required",
@@ -33,12 +33,35 @@ const tenantSchema = z.object({
   rentHistory: z.array(z.object({
     amount: z.number().min(0),
     paidAt: z.date().default(() => new Date()),
-    status: z.enum(["Paid"]).default("Paid") // Updated to match schema
+    status: z.enum(["Paid"]).default("Paid")
+  })).optional(),
+  rentChanges: z.array(z.object({
+    amount: z.number().min(0),
+    effectiveFrom: z.string().datetime().transform(val => new Date(val))
   })).optional(),
   electricityPerUnit: z.number().min(0).optional(),
   startingUnit: z.number().min(0).optional(),
   currentUnit: z.number().min(0).optional()
 });
+
+// Function to get applicable rent for a specific month
+function getRentForMonth(year, month, rentChanges, defaultRent) {
+  // If no rent changes, use default rent
+  if (!rentChanges || rentChanges.length === 0) {
+    return defaultRent || 0;
+  }
+  // Rent changes must be sorted by effectiveFrom ASC
+  let applicableRent = rentChanges[0].amount;
+  for (const change of rentChanges) {
+    const effective = new Date(change.effectiveFrom);
+    if (effective <= new Date(year, month, 1)) {
+      applicableRent = change.amount;
+    } else {
+      break;
+    }
+  }
+  return applicableRent;
+}
 
 // Function to calculate tenant status, due, and overpaid amounts
 function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
@@ -46,39 +69,31 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   if (!tenant.unitId) {
     return { status: "Unassigned", due: 0, overpaid: 0, dueAmountDate: null };
   }
-
-  // If tenant has no startingDate, dueDate, or monthlyRent, return Due status
-  if (!tenant.startingDate || !tenant.dueDate || !tenant.monthlyRent) {
+  if (!tenant.startingDate || !tenant.dueDate) {
     return { status: "Due", due: 0, overpaid: 0, dueAmountDate: null };
   }
 
   const start = new Date(tenant.startingDate);
   const end = tenant.endingDate ? new Date(tenant.endingDate) : currentDate;
-
-  // Generate all months from start to current date or end date
-  const monthsToCheck = [];
+  let monthsToCheck = [];
   let current = new Date(start.getFullYear(), start.getMonth(), 1);
 
   while (current <= end && current <= currentDate) {
-    // Exclude current month if before dueDate
     if (
       current.getFullYear() === currentDate.getFullYear() &&
       current.getMonth() === currentDate.getMonth() &&
       currentDate.getDate() < tenant.dueDate
-    ) {
-      break;
-    }
-    monthsToCheck.push({
-      month: current.getMonth() + 1,
-      year: current.getFullYear(),
-    });
+    ) break;
+    monthsToCheck.push({ year: current.getFullYear(), month: current.getMonth() });
     current.setMonth(current.getMonth() + 1);
   }
-
-  // Calculate total expected rent
-  let totalExpectedRent = monthsToCheck.length * tenant.monthlyRent;
-
-  // Calculate total electricity cost
+  let totalExpectedRent = 0;
+  const rentChanges = (tenant.rentChanges || []).sort(
+    (a, b) => new Date(a.effectiveFrom) - new Date(b.effectiveFrom)
+  );
+  for (const m of monthsToCheck) {
+    totalExpectedRent += getRentForMonth(m.year, m.month, rentChanges, tenant.monthlyRent);
+  }
   let totalElectricityCost = 0;
   if (
     tenant.electricityPerUnit &&
@@ -90,13 +105,7 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   }
 
   const totalExpected = totalExpectedRent + totalElectricityCost;
-
-  // Calculate total paid amount
-  const totalPaid = tenant.rentHistory.reduce((sum, rh) => {
-    return sum + rh.amount; // All entries are "Paid"
-  }, 0);
-
-  // Calculate due and overpaid
+  const totalPaid = tenant.rentHistory.reduce((sum, rh) => sum + rh.amount, 0);
   const tenantBalance = totalExpected - totalPaid;
   const due = tenantBalance > 0 ? tenantBalance : 0;
   const overpaid = tenantBalance < 0 ? Math.abs(tenantBalance) : 0;
@@ -108,7 +117,7 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   let dueAmountDate = null;
   if (due > 0 && monthsToCheck.length > 0) {
     const lastMonth = monthsToCheck[monthsToCheck.length - 1];
-    const dueDate = new Date(Date.UTC(lastMonth.year, lastMonth.month - 1, tenant.dueDate, 0, 0, 0, 0));
+    const dueDate = new Date(Date.UTC(lastMonth.year, lastMonth.month, tenant.dueDate));
     dueAmountDate = dueDate.toISOString();
   }
 
@@ -250,7 +259,11 @@ export default async function routes(app) {
       const tenant = await Tenant.create({
         landlordId,
         ...body,
-        currentUnit: body.startingUnit || 0
+        currentUnit: body.startingUnit || 0,
+        rentChanges:
+          body.monthlyRent && body.startingDate
+            ? [{ amount: body.monthlyRent, effectiveFrom: new Date(body.startingDate) }]
+            : []
       });
 
       if (floorId && body.propertyId) {
@@ -497,7 +510,7 @@ export default async function routes(app) {
       const { page, limit } = querySchema.parse(req.query);
   
       const skip = (page - 1) * limit;
-  
+
       // Fetch tenants with pagination
       const tenants = await Tenant.find({ landlordId })
         .sort({ createdAt: -1 })
@@ -505,16 +518,16 @@ export default async function routes(app) {
         .limit(limit)
         .populate("propertyId", "name address")
         .populate("unitId");
-  
+
       const totalTenants = await Tenant.countDocuments({ landlordId });
       const totalPages = Math.ceil(totalTenants / limit);
-  
+
       // Enrich tenants manually
       const enrichedTenants = tenants.map(t => {
         const { status, due, overpaid, dueAmountDate } = calculateTenantStatusAndDue(t);
         return { ...t.toObject(), status, due, overpaid, dueAmountDate };
       });
-  
+
       return reply.send({
         success: true,
         count: enrichedTenants.length,
@@ -548,22 +561,22 @@ export default async function routes(app) {
       const { page, limit } = querySchema.parse(req.query);
   
       const skip = (page - 1) * limit;
-  
+
       // Fetch unassigned tenants with pagination
       const tenants = await Tenant.find({ landlordId, propertyId: null })
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit);
-  
+
       const totalTenants = await Tenant.countDocuments({ landlordId, propertyId: null });
       const totalPages = Math.ceil(totalTenants / limit);
-  
+
       // Enrich tenants manually
       const enrichedTenants = tenants.map(t => {
         const { status, due, overpaid } = calculateTenantStatusAndDue(t);
         return { ...t.toObject(), status, due, overpaid };
       });
-  
+
       return reply.send({
         success: true,
         count: enrichedTenants.length,
@@ -666,10 +679,10 @@ export default async function routes(app) {
         transactionDate: z.string().datetime().optional(),
         currentElectricityUnit: z.number().min(0).optional()
       }).parse(req.body);
-  
+
       const tenant = await Tenant.findOne({ _id: req.params.id, landlordId });
       if (!tenant) return reply.code(404).send({ success: false, message: "Tenant not found" });
-  
+
       // Handle electricity unit update if provided
       if (currentElectricityUnit !== undefined) {
         if (tenant.electricityPerUnit !== undefined && tenant.startingUnit !== undefined) {
@@ -683,22 +696,73 @@ export default async function routes(app) {
           tenant.currentUnit = currentElectricityUnit;
         }
       }
-  
+
       tenant.rentHistory.push({
         amount,
         status: "Paid",
         paidAt: transactionDate ? new Date(transactionDate) : new Date()
       });
       await tenant.save();
-  
+
       const populatedTenant = await Tenant.findOne({ _id: req.params.id, landlordId })
         .populate("propertyId", "name address")
         .populate("unitId");
-  
+
       const { status, due, overpaid, dueAmountDate } = calculateTenantStatusAndDue(populatedTenant);
       return reply.send({
         success: true,
         message: "Rent payment recorded successfully",
+        tenant: { ...populatedTenant.toObject(), status, due, overpaid, dueAmountDate }
+      });
+    } catch (err) {
+      return reply.code(400).send({
+        success: false,
+        message: err.message
+      });
+    }
+  });
+
+  // Increase Rent for Tenant
+  app.post("/rent-increase/:id", async (req, reply) => {
+    try {
+      const landlordId = req.user.sub;
+      const { amount, effectiveFrom } = z.object({
+        amount: z.number().min(0),
+        effectiveFrom: z.string().datetime()
+      }).parse(req.body);
+      const tenant = await Tenant.findOne({ _id: req.params.id, landlordId });
+      if (!tenant) {
+        return reply.code(404).send({ success: false, message: "Tenant not found" });
+      }
+      if (tenant.startingDate && new Date(effectiveFrom) < new Date(tenant.startingDate)) {
+        return reply.code(400).send({
+          success: false,
+          message: "Rent change effective date cannot be before tenant start date"
+        });
+      }
+      tenant.rentChanges = tenant.rentChanges || [];
+      const alreadyExists = tenant.rentChanges.some(rc =>
+        new Date(rc.effectiveFrom).toISOString() === new Date(effectiveFrom).toISOString()
+      );
+      if (alreadyExists) {
+        return reply.code(400).send({
+          success: false,
+          message: "A rent change already exists for this effective date"
+        });
+      }
+      tenant.rentChanges.push({
+        amount,
+        effectiveFrom: new Date(effectiveFrom)
+      });
+      tenant.monthlyRent = amount;
+      await tenant.save();
+      const populatedTenant = await Tenant.findOne({ _id: req.params.id, landlordId })
+        .populate("propertyId", "name address")
+        .populate("unitId");
+      const { status, due, overpaid, dueAmountDate } = calculateTenantStatusAndDue(populatedTenant);
+      return reply.send({
+        success: true,
+        message: "Rent increased successfully",
         tenant: { ...populatedTenant.toObject(), status, due, overpaid, dueAmountDate }
       });
     } catch (err) {

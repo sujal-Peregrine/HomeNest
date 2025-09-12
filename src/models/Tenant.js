@@ -14,6 +14,10 @@ const RentHistory = new Schema({
   status: { type: String, enum: ["Paid"], default: "Paid" } 
 }, { _id: false });
 
+const rentChanges =new Schema({
+  amount: { type: Number, required: true },
+  effectiveFrom: { type: Date, default: Date.now },
+})
 const TenantSchema = new Schema(
   {
     landlordId: { type: Types.ObjectId, ref: "users", required: true, index: true },
@@ -41,6 +45,7 @@ const TenantSchema = new Schema(
     depositMoney: { type: Number, default: 0 },
     documents: [Document],
     rentHistory: [RentHistory],
+    rentChanges:[rentChanges],
     electricityPerUnit: { type: Number, default: 0 }, // Cost per electricity unit
     startingUnit: { type: Number, default: 0 }, // Initial electricity meter reading
     currentUnit: { type: Number, default: 0 } // Current electricity meter reading
