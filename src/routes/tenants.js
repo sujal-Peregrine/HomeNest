@@ -290,16 +290,24 @@ export default async function routes(app) {
         floorId = unit.floorId;
       }
 
-      // Create tenant
-      const tenant = await Tenant.create({
+      // Prepare tenant data with initial history
+      const tenantData = {
         landlordId,
         ...body,
         currentUnit: body.startingUnit || 0,
         rentChanges:
           body.monthlyRent && body.startingDate
             ? [{ amount: body.monthlyRent, effectiveFrom: new Date(body.startingDate) }]
-            : []
-      });
+            : [],
+        tenantHistory: [{
+          propertyId: body.propertyId ? new mongoose.Types.ObjectId(body.propertyId) : null,
+          unitId: body.unitId ? new mongoose.Types.ObjectId(body.unitId) : null,
+          updatedAt: new Date()
+        }]
+      };
+
+      // Create tenant
+      const tenant = await Tenant.create(tenantData);
 
       if (floorId && body.propertyId) {
         await updateFloorCounts(body.propertyId, floorId, landlordId);
@@ -468,8 +476,23 @@ export default async function routes(app) {
         tenant.currentUnit = body.startingUnit;
       }
 
+      // Check if property or unit changed to add history entry
+      const propertyChanged = targetPropertyId !== oldPropertyId;
+      const unitChanged = body.unitId !== undefined && (body.unitId === null || body.unitId !== oldUnitId);
+      const historyChanged = propertyChanged || unitChanged;
+
       Object.assign(tenant, body);
       await tenant.save();
+
+      // Add new history entry if changed
+      if (historyChanged) {
+        tenant.tenantHistory.push({
+          propertyId: targetPropertyId ? new mongoose.Types.ObjectId(targetPropertyId) : null,
+          unitId: body.unitId !== undefined ? (body.unitId ? new mongoose.Types.ObjectId(body.unitId) : null) : (tenant.unitId ? tenant.unitId : null),
+          updatedAt: new Date()
+        });
+        await tenant.save();
+      }
 
       const populatedTenant = await Tenant.findOne({ _id: req.params.id, landlordId })
         .populate("propertyId", "name address")
