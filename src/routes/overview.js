@@ -23,25 +23,40 @@ function getRentForMonth(year, month, rentChanges, defaultRent) {
 }
 
 function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
-  // If tenant has no unit assigned, return Unassigned status
-  if (!tenant.unitId) {
-    return { status: "Unassigned", due: 0, overpaid: 0, dueAmountDate: null, totalPaid: 0, totalExpectedRent: 0, totalElectricityCost: 0 };
+  // 🟢 Case 1: Never assigned a unit at all
+  if (!tenant.unitId && !tenant.startingDate) {
+    return {
+      status: "Unassigned",
+      due: 0,
+      overpaid: 0,
+      dueAmountDate: null,
+      totalPaid: 0,
+      totalExpectedRent: 0,
+      totalElectricityCost: 0
+    };
   }
 
-  // If tenant has no startingDate or dueDate, return Due status
+  // 🟢 Case 2: Missing key info
   if (!tenant.startingDate || !tenant.dueDate) {
-    return { status: "Due", due: 0, overpaid: 0, dueAmountDate: null, totalPaid: 0, totalExpectedRent: 0, totalElectricityCost: 0 };
+    return {
+      status: "Due",
+      due: 0,
+      overpaid: 0,
+      dueAmountDate: null,
+      totalPaid: 0,
+      totalExpectedRent: 0,
+      totalElectricityCost: 0
+    };
   }
 
   const start = new Date(tenant.startingDate);
-  const end = tenant.endingDate ? new Date(tenant.endingDate) : currentDate;
+  const effectiveEnd = tenant.endingDate ? new Date(tenant.endingDate) : currentDate;
 
   // Generate all months from start to current date or end date
   const monthsToCheck = [];
   let current = new Date(start.getFullYear(), start.getMonth(), 1);
 
-  while (current <= end && current <= currentDate) {
-    // Exclude current month if before dueDate
+  while (current <= effectiveEnd && current <= currentDate) {
     if (
       current.getFullYear() === currentDate.getFullYear() &&
       current.getMonth() === currentDate.getMonth() &&
@@ -77,7 +92,7 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
 
   // Calculate total paid amount
   const totalPaid = (tenant.rentHistory || []).reduce((sum, rh) => {
-    return sum + (rh.amount || 0); // All entries are "Paid"
+    return sum + (rh.amount || 0);
   }, 0);
 
   // Calculate due and overpaid
@@ -85,8 +100,15 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   const due = tenantBalance > 0 ? tenantBalance : 0;
   const overpaid = tenantBalance < 0 ? Math.abs(tenantBalance) : 0;
 
-  // Status is "Due" if due > 0, otherwise "Active"
-  const status = due > 0 ? "Due" : "Active";
+  // Status
+  let status;
+  if (!tenant.unitId && tenant.startingDate) {
+    status = "Unassigned"; // unit removed but tenant lived before
+  } else if (tenant.endingDate) {
+    status = "Inactive"; // explicitly ended
+  } else {
+    status = due > 0 ? "Due" : "Active";
+  }
 
   // Calculate dueAmountDate if there is a due amount
   let dueAmountDate = null;
