@@ -49,14 +49,32 @@ function getRentForMonth(year, month, rentChanges, defaultRent) {
 }
 
 function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
-  // If tenant has no unit assigned, return Unassigned status
-  if (!tenant.unitId) {
-    return { status: "Unassigned", due: 0, overpaid: 0, dueAmountDate: null, totalPaid: 0, totalExpectedRent: 0, totalElectricityCost: 0 };
+  // Case 1: never assigned to any unit/property
+  if (!tenant.unitId && (!tenant.tenantHistory || tenant.tenantHistory.length === 0)) {
+    return [{
+      status: "Unassigned",
+      due: 0,
+      overpaid: 0,
+      dueAmountDate: null,
+      totalPaid: 0,
+      totalExpectedRent: 0,
+      totalElectricityCost: 0,
+      propertyId: tenant.propertyId || null
+    }];
   }
 
   // If tenant has no startingDate or dueDate, return Due status
   if (!tenant.startingDate || !tenant.dueDate) {
-    return { status: "Due", due: 0, overpaid: 0, dueAmountDate: null, totalPaid: 0, totalExpectedRent: 0, totalElectricityCost: 0 };
+    return [{
+      status: "Due",
+      due: 0,
+      overpaid: 0,
+      dueAmountDate: null,
+      totalPaid: 0,
+      totalExpectedRent: 0,
+      totalElectricityCost: 0,
+      propertyId: tenant.propertyId || null
+    }];
   }
 
   const start = new Date(tenant.startingDate);
@@ -67,7 +85,6 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   let current = new Date(start.getFullYear(), start.getMonth(), 1);
 
   while (current <= end && current <= currentDate) {
-    // Exclude current month if before dueDate
     if (
       current.getFullYear() === currentDate.getFullYear() &&
       current.getMonth() === currentDate.getMonth() &&
@@ -79,16 +96,76 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
     current.setMonth(current.getMonth() + 1);
   }
 
-  // Calculate total expected rent using rentChanges
-  let totalExpectedRent = 0;
+  // Build periods from tenantHistory
+  let periods = [];
+  const history = (tenant.tenantHistory || []).slice().sort((a, b) => new Date(a.updatedAt) - new Date(b.updatedAt));
+
+  if (history.length === 0) {
+    periods.push({
+      propertyId: tenant.propertyId,
+      startDate: start,
+      endDate: end,
+    });
+  } else {
+    let currentStart = start;
+    for (let i = 0; i < history.length; i++) {
+      const hStart = new Date(history[i].updatedAt);
+      const thisStart = (i === 0 && start < hStart) ? start : hStart;
+      const nextStart = i < history.length - 1 ? new Date(history[i + 1].updatedAt) : end;
+      periods.push({
+        propertyId: history[i].propertyId,
+        startDate: thisStart,
+        endDate: nextStart,
+      });
+      currentStart = nextStart;
+    }
+
+    // Add current property period if tenant is still active
+    const lastHistoryProperty = history.length > 0 ? history[history.length - 1].propertyId : null;
+    if (tenant.propertyId && (!lastHistoryProperty || !lastHistoryProperty.equals?.(tenant.propertyId))) {
+      periods.push({
+        propertyId: tenant.propertyId,
+        startDate: currentStart,
+        endDate: end,
+      });
+    }
+  }
+
+  // Initialize results
+  const results = periods.map(p => ({
+    propertyId: p.propertyId,
+    status: "Inactive",
+    due: 0,
+    overpaid: 0,
+    dueAmountDate: null,
+    totalPaid: 0,
+    totalExpectedRent: 0,
+    totalElectricityCost: 0,
+  }));
+
+  // Expected rent calculations
   const rentChanges = (tenant.rentChanges || []).sort(
     (a, b) => new Date(a.effectiveFrom) - new Date(b.effectiveFrom)
   );
+  const periodLastMonths = periods.map(() => null);
+
   for (const m of monthsToCheck) {
-    totalExpectedRent += getRentForMonth(m.year, m.month - 1, rentChanges, tenant.monthlyRent);
+    const rent = getRentForMonth(m.year, m.month - 1, rentChanges, tenant.monthlyRent);
+    const monthDueDate = new Date(m.year, m.month - 1, tenant.dueDate);
+
+    const periodIndex = periods.findIndex(
+      (p, i) =>
+        monthDueDate >= p.startDate &&
+        (i < periods.length - 1 ? monthDueDate < p.endDate : monthDueDate <= p.endDate)
+    );
+
+    if (periodIndex !== -1) {
+      results[periodIndex].totalExpectedRent += rent;
+      periodLastMonths[periodIndex] = m;
+    }
   }
 
-  // Calculate total electricity cost
+  // Electricity cost → only if tenant is currently in a unit
   let totalElectricityCost = 0;
   if (
     tenant.electricityPerUnit != null &&
@@ -98,32 +175,58 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   ) {
     totalElectricityCost = (tenant.currentUnit - tenant.startingUnit) * tenant.electricityPerUnit;
   }
-
-  const totalExpected = totalExpectedRent + totalElectricityCost;
-
-  // Calculate total paid amount
-  const totalPaid = (tenant.rentHistory || []).reduce((sum, rh) => {
-    return sum + (rh.amount || 0); // All entries are "Paid"
-  }, 0);
-
-  // Calculate due and overpaid
-  const tenantBalance = totalExpected - totalPaid;
-  const due = tenantBalance > 0 ? tenantBalance : 0;
-  const overpaid = tenantBalance < 0 ? Math.abs(tenantBalance) : 0;
-
-  // Status is "Due" if due > 0, otherwise "Active"
-  const status = due > 0 ? "Due" : "Active";
-
-  // Calculate dueAmountDate if there is a due amount
-  let dueAmountDate = null;
-  if (due > 0 && monthsToCheck.length > 0) {
-    const lastMonth = monthsToCheck[monthsToCheck.length - 1];
-    const dueDate = new Date(Date.UTC(lastMonth.year, lastMonth.month - 1, tenant.dueDate));
-    dueAmountDate = dueDate.toISOString();
+  if (results.length > 0 && tenant.unitId) {
+    results[results.length - 1].totalElectricityCost += totalElectricityCost;
   }
 
-  return { status, due, overpaid, dueAmountDate, totalPaid, totalExpectedRent, totalElectricityCost };
+  // Distribute payments FIFO
+  let remainingPaid = (tenant.rentHistory || []).reduce((sum, rh) => sum + (rh.amount || 0), 0);
+
+  for (const result of results) {
+    const totalExpected = result.totalExpectedRent + result.totalElectricityCost;
+
+    if (remainingPaid >= totalExpected) {
+      result.totalPaid = totalExpected;
+      remainingPaid -= totalExpected;
+    } else {
+      result.totalPaid = remainingPaid;
+      remainingPaid = 0;
+    }
+
+    const balance = totalExpected - result.totalPaid;
+    result.due = balance > 0 ? balance : 0;
+    result.overpaid = 0;
+  }
+
+  // Extra money → overpaid on last period
+  if (remainingPaid > 0 && results.length > 0) {
+    const last = results[results.length - 1];
+    last.overpaid = remainingPaid;
+    last.totalPaid += remainingPaid;
+  }
+
+  // Status per period
+  for (const result of results) {
+    if (tenant.propertyId && result.propertyId?.equals?.(tenant.propertyId)) {
+      result.status = tenant.endingDate ? "Inactive" : (result.due > 0 ? "Due" : "Active");
+    } else {
+      result.status = "Inactive";
+    }
+  }
+
+  // Due dates
+  results.forEach((r, i) => {
+    if (r.due > 0 && periodLastMonths[i]) {
+      const lastMonth = periodLastMonths[i];
+      const dueDate = new Date(Date.UTC(lastMonth.year, lastMonth.month - 1, tenant.dueDate));
+      r.dueAmountDate = dueDate.toISOString();
+    }
+  });
+
+  return results;
 }
+
+
 export default async function routes(app) {
   app.addHook("preHandler", app.auth);
   // ✅ Create Property
@@ -368,31 +471,35 @@ export default async function routes(app) {
   
       const tenants = await Tenant.find({
         landlordId: new mongoose.Types.ObjectId(landlordId),
-        propertyId: { $in: propertyIds }
-      }).select("propertyId unitId monthlyRent startingDate endingDate dueDate rentHistory electricityPerUnit startingUnit currentUnit rentChanges");
+        $or: [
+          { propertyId: { $in: propertyIds } },
+          { "tenantHistory.propertyId": { $in: propertyIds } }
+        ]
+      }).select("propertyId unitId monthlyRent startingDate endingDate dueDate rentHistory electricityPerUnit startingUnit currentUnit rentChanges tenantHistory");
   
-      // Tenant counts per property
+      // Tenant counts per property (current tenants only)
       const tenantCounts = await Tenant.aggregate([
         { $match: { landlordId: new mongoose.Types.ObjectId(landlordId), propertyId: { $in: propertyIds } } },
         { $group: { _id: "$propertyId", totalTenants: { $sum: 1 } } }
       ]);
       const tenantCountMap = Object.fromEntries(tenantCounts.map(t => [t._id.toString(), t.totalTenants]));
   
-      // ✅ Per-property rent aggregation (fixed)
+      // Per-property rent aggregation
       const rentMap = {};
       for (const tenant of tenants) {
-        if (!tenant.unitId) continue;
-        const propId = tenant.propertyId.toString();
-        if (!rentMap[propId]) {
-          rentMap[propId] = { collected: 0, due: 0, overpaid: 0, expectedRent: 0, expectedElectricity: 0 };
+        const results = calculateTenantStatusAndDue(tenant, currentDate);
+        for (const result of results) {
+          if (!result.propertyId) continue;
+          const propId = result.propertyId.toString();
+          if (!rentMap[propId]) {
+            rentMap[propId] = { collected: 0, due: 0, overpaid: 0, expectedRent: 0, expectedElectricity: 0 };
+          }
+          rentMap[propId].collected += result.totalPaid;
+          rentMap[propId].due += result.due;
+          rentMap[propId].overpaid += result.overpaid;
+          rentMap[propId].expectedRent += result.totalExpectedRent;
+          rentMap[propId].expectedElectricity += result.totalElectricityCost;
         }
-  
-        const { due, overpaid, totalPaid, totalExpectedRent, totalElectricityCost } = calculateTenantStatusAndDue(tenant, currentDate);
-        rentMap[propId].collected += totalPaid;
-        rentMap[propId].due += due;
-        rentMap[propId].overpaid += overpaid;
-        rentMap[propId].expectedRent += totalExpectedRent;
-        rentMap[propId].expectedElectricity += totalElectricityCost;
       }
   
       const overviewData = properties.map(p => ({

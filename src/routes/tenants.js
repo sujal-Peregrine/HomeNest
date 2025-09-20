@@ -302,7 +302,7 @@ export default async function routes(app) {
         tenantHistory: [{
           propertyId: body.propertyId ? new mongoose.Types.ObjectId(body.propertyId) : null,
           unitId: body.unitId ? new mongoose.Types.ObjectId(body.unitId) : null,
-          updatedAt: new Date()
+          updatedAt: body.startingDate
         }]
       };
 
