@@ -10,8 +10,6 @@ const bulkSchema = z.object({
     propertyId: z.string().min(1),
     floorId: z.string().min(1),
     unitLabel: z.string().min(1),
-    baseMonthlyRent: z.number().nonnegative().default(0),
-    electricityPerUnit: z.number().int().nonnegative().default(0)
   })).min(1)
 });
 
