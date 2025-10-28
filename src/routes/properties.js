@@ -30,12 +30,11 @@ function floorName(i) {
   return `${i}th Floor`;
 }
 // Function to get applicable rent for a specific month
+// Function to get applicable rent for a specific month
 function getRentForMonth(year, month, rentChanges, defaultRent) {
-  // If no rent changes, use default rent
   if (!rentChanges || rentChanges.length === 0) {
     return defaultRent || 0;
   }
-  // Rent changes must be sorted by effectiveFrom ASC
   let applicableRent = rentChanges[0].amount;
   for (const change of rentChanges) {
     const effective = new Date(change.effectiveFrom);
@@ -48,6 +47,7 @@ function getRentForMonth(year, month, rentChanges, defaultRent) {
   return applicableRent;
 }
 
+// Updated calculation function without dueDate concept
 function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   // Case 1: never assigned to any unit/property
   if (!tenant.unitId && (!tenant.tenantHistory || tenant.tenantHistory.length === 0)) {
@@ -63,8 +63,8 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
     }];
   }
 
-  // If tenant has no startingDate or dueDate, return Due status
-  if (!tenant.startingDate || !tenant.dueDate) {
+  // If tenant has no startingDate, return Due status
+  if (!tenant.startingDate) {
     return [{
       status: "Due",
       due: 0,
@@ -79,22 +79,6 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
 
   const start = new Date(tenant.startingDate);
   const end = tenant.endingDate ? new Date(tenant.endingDate) : currentDate;
-
-  // Generate all months from start to current date or end date
-  const monthsToCheck = [];
-  let current = new Date(start.getFullYear(), start.getMonth(), 1);
-
-  while (current <= end && current <= currentDate) {
-    if (
-      current.getFullYear() === currentDate.getFullYear() &&
-      current.getMonth() === currentDate.getMonth() &&
-      currentDate.getDate() < tenant.dueDate
-    ) {
-      break;
-    }
-    monthsToCheck.push({ month: current.getMonth() + 1, year: current.getFullYear() });
-    current.setMonth(current.getMonth() + 1);
-  }
 
   // Build periods from tenantHistory
   let periods = [];
@@ -143,25 +127,76 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
     totalElectricityCost: 0,
   }));
 
-  // Expected rent calculations
+  // Expected rent calculations using day-based logic
   const rentChanges = (tenant.rentChanges || []).sort(
     (a, b) => new Date(a.effectiveFrom) - new Date(b.effectiveFrom)
   );
-  const periodLastMonths = periods.map(() => null);
 
-  for (const m of monthsToCheck) {
-    const rent = getRentForMonth(m.year, m.month - 1, rentChanges, tenant.monthlyRent);
-    const monthDueDate = new Date(m.year, m.month - 1, tenant.dueDate);
+  // Calculate rent for each period
+  for (let periodIndex = 0; periodIndex < periods.length; periodIndex++) {
+    const period = periods[periodIndex];
+    const periodStart = period.startDate;
+    const periodEnd = period.endDate;
 
-    const periodIndex = periods.findIndex(
-      (p, i) =>
-        monthDueDate >= p.startDate &&
-        (i < periods.length - 1 ? monthDueDate < p.endDate : monthDueDate <= p.endDate)
-    );
+    // Iterate through each month in this period
+    let current = new Date(periodStart.getFullYear(), periodStart.getMonth(), 1);
 
-    if (periodIndex !== -1) {
-      results[periodIndex].totalExpectedRent += rent;
-      periodLastMonths[periodIndex] = m;
+    while (current <= periodEnd && current <= currentDate) {
+      const monthRent = getRentForMonth(current.getFullYear(), current.getMonth(), rentChanges, tenant.monthlyRent);
+
+      const monthStart = new Date(current);
+      const monthEnd = new Date(current.getFullYear(), current.getMonth() + 1, 0); // Last day of month
+
+      // Determine the actual start and end dates for this month within the period
+      const actualStart = monthStart < periodStart ? periodStart : monthStart;
+      const actualEnd = monthEnd > periodEnd ? periodEnd : monthEnd;
+      const finalEnd = actualEnd > currentDate ? currentDate : actualEnd;
+
+      // Calculate days in this billing period
+      const daysInMonth = monthEnd.getDate();
+      const startDay = actualStart.getDate();
+      const endDay = finalEnd.getDate();
+
+      // Calculate days occupied
+      let daysOccupied;
+      if (actualStart.getMonth() === finalEnd.getMonth() && actualStart.getFullYear() === finalEnd.getFullYear()) {
+        // Same month - calculate days difference
+        daysOccupied = endDay - startDay + 1;
+      } else {
+        // Full month or partial month at the end
+        if (current.getMonth() === periodStart.getMonth() && current.getFullYear() === periodStart.getFullYear()) {
+          // First month - from start date to end of month
+          daysOccupied = daysInMonth - startDay + 1;
+        } else if (current.getMonth() === finalEnd.getMonth() && current.getFullYear() === finalEnd.getFullYear()) {
+          // Last month - from start of month to current date
+          daysOccupied = endDay;
+        } else {
+          // Full month in between
+          daysOccupied = daysInMonth;
+        }
+      }
+
+      // Apply the rent calculation logic:
+      // - If full month (all days occupied): full rent
+      // - If 16+ days: full rent
+      // - If 1-15 days: half rent
+      let rentForThisPeriod = 0;
+
+      if (daysOccupied >= daysInMonth) {
+        // Full month
+        rentForThisPeriod = monthRent;
+      } else if (daysOccupied >= 16) {
+        // 16 or more days = full month rent
+        rentForThisPeriod = monthRent;
+      } else if (daysOccupied >= 1) {
+        // 1-15 days = half month rent
+        rentForThisPeriod = monthRent / 2;
+      }
+
+      results[periodIndex].totalExpectedRent += rentForThisPeriod;
+
+      // Move to next month
+      current.setMonth(current.getMonth() + 1);
     }
   }
 
@@ -215,11 +250,9 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   }
 
   // Due dates
-  results.forEach((r, i) => {
-    if (r.due > 0 && periodLastMonths[i]) {
-      const lastMonth = periodLastMonths[i];
-      const dueDate = new Date(Date.UTC(lastMonth.year, lastMonth.month - 1, tenant.dueDate));
-      r.dueAmountDate = dueDate.toISOString();
+  results.forEach((r) => {
+    if (r.due > 0) {
+      r.dueAmountDate = currentDate.toISOString();
     }
   });
 
@@ -475,7 +508,7 @@ export default async function routes(app) {
           { propertyId: { $in: propertyIds } },
           { "tenantHistory.propertyId": { $in: propertyIds } }
         ]
-      }).select("propertyId unitId monthlyRent startingDate endingDate dueDate rentHistory electricityPerUnit startingUnit currentUnit rentChanges tenantHistory");
+      }).select("propertyId unitId monthlyRent startingDate endingDate rentHistory electricityPerUnit startingUnit currentUnit rentChanges tenantHistory");
   
       // Tenant counts per property (current tenants only)
       const tenantCounts = await Tenant.aggregate([

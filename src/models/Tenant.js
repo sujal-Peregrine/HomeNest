@@ -46,7 +46,6 @@ const TenantSchema = new Schema(
     propertyId: { type: Types.ObjectId, ref: "properties", required: false },
     unitId: { type: Types.ObjectId, ref: "Unit", required: false },
     monthlyRent: { type: Number, default: 0 },
-    dueDate: { type: Number, default: null },
     startingDate: { type: Date, default: null },
     endingDate: { type: Date, default: null },
     depositMoney: { type: Number, default: 0 },
