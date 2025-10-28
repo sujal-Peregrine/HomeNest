@@ -50,7 +50,25 @@ function getRentForMonth(year, month, rentChanges, defaultRent) {
 // Updated calculation function without dueDate concept
 function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   // Case 1: never assigned to any unit/property
-  if (!tenant.unitId && (!tenant.tenantHistory || tenant.tenantHistory.length === 0)) {
+  if (tenant.propertyId && typeof tenant.propertyId === "object" && tenant.propertyId._id) {
+    tenant.propertyId = tenant.propertyId._id;
+  }
+  if (tenant.unitId && typeof tenant.unitId === "object" && tenant.unitId._id) {
+    tenant.unitId = tenant.unitId._id;
+  }
+  if (tenant.tenantHistory?.length) {
+    tenant.tenantHistory = tenant.tenantHistory.map(h => ({
+      ...h,
+      propertyId:
+        h.propertyId && typeof h.propertyId === "object" && h.propertyId._id
+          ? h.propertyId._id
+          : h.propertyId || null,
+    }));
+  }
+
+  // 🚫 Case 1: Never assigned to any unit/property
+  const hasValidHistory = tenant.tenantHistory?.some(h => h.propertyId);
+  if (!tenant.unitId && !hasValidHistory) {
     return [{
       status: "Unassigned",
       due: 0,
@@ -63,7 +81,7 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
     }];
   }
 
-  // If tenant has no startingDate, return Due status
+  // 🚫 Case 2: No starting date yet (assigned but not active)
   if (!tenant.startingDate) {
     return [{
       status: "Due",
@@ -80,9 +98,11 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   const start = new Date(tenant.startingDate);
   const end = tenant.endingDate ? new Date(tenant.endingDate) : currentDate;
 
-  // Build periods from tenantHistory
+  // ✅ Build periods only for valid property assignments
   let periods = [];
-  const history = (tenant.tenantHistory || []).slice().sort((a, b) => new Date(a.updatedAt) - new Date(b.updatedAt));
+  const history = (tenant.tenantHistory || [])
+    .filter(h => h.propertyId) // ignore nulls
+    .sort((a, b) => new Date(a.updatedAt) - new Date(b.updatedAt));
 
   if (history.length === 0) {
     periods.push({
@@ -93,20 +113,21 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   } else {
     let currentStart = start;
     for (let i = 0; i < history.length; i++) {
-      const hStart = new Date(history[i].updatedAt);
-      const thisStart = (i === 0 && start < hStart) ? start : hStart;
+      const h = history[i];
+      const hStart = new Date(h.updatedAt);
       const nextStart = i < history.length - 1 ? new Date(history[i + 1].updatedAt) : end;
+
       periods.push({
-        propertyId: history[i].propertyId,
-        startDate: thisStart,
+        propertyId: h.propertyId,
+        startDate: hStart,
         endDate: nextStart,
       });
       currentStart = nextStart;
     }
 
-    // Add current property period if tenant is still active
-    const lastHistoryProperty = history.length > 0 ? history[history.length - 1].propertyId : null;
-    if (tenant.propertyId && (!lastHistoryProperty || !lastHistoryProperty.equals?.(tenant.propertyId))) {
+    // Include active assignment if tenant still has valid property
+    const lastHistoryProperty = history[history.length - 1].propertyId;
+    if (tenant.propertyId && (!lastHistoryProperty || tenant.propertyId.toString() !== lastHistoryProperty.toString())) {
       periods.push({
         propertyId: tenant.propertyId,
         startDate: currentStart,
