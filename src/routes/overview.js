@@ -51,7 +51,32 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   }
 
   const start = new Date(tenant.startingDate);
-  const effectiveEnd = tenant.endingDate ? new Date(tenant.endingDate) : currentDate;
+  
+  // 🔥 FIX: Find the actual end date from tenant history
+  // If tenant was unassigned, use the date when they were unassigned
+  let actualEndDate = tenant.endingDate ? new Date(tenant.endingDate) : null;
+  
+  // Check tenant history to find when unit/property was set to null
+  if (!actualEndDate && tenant.tenantHistory && tenant.tenantHistory.length > 0) {
+    // Find the last assignment (where property/unit is not null)
+    let lastAssignmentIndex = -1;
+    for (let i = tenant.tenantHistory.length - 1; i >= 0; i--) {
+      if (tenant.tenantHistory[i].propertyId || tenant.tenantHistory[i].unitId) {
+        lastAssignmentIndex = i;
+        break;
+      }
+    }
+    
+    // If there's a history entry after the last assignment with null values, use that date
+    if (lastAssignmentIndex !== -1 && lastAssignmentIndex < tenant.tenantHistory.length - 1) {
+      const unassignmentEntry = tenant.tenantHistory[lastAssignmentIndex + 1];
+      if (!unassignmentEntry.propertyId && !unassignmentEntry.unitId) {
+        actualEndDate = new Date(unassignmentEntry.updatedAt);
+      }
+    }
+  }
+  
+  const effectiveEnd = actualEndDate || currentDate;
 
   // Calculate rent based on days elapsed
   let totalExpectedRent = 0;
@@ -147,8 +172,8 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   let status;
   if (!tenant.unitId && tenant.startingDate) {
     status = "Unassigned"; // unit removed but tenant lived before
-  } else if (tenant.endingDate) {
-    status = "Inactive"; // explicitly ended
+  } else if (tenant.endingDate || actualEndDate) {
+    status = "Inactive"; // explicitly ended or unassigned
   } else {
     status = due > 0 ? "Due" : "Active";
   }
@@ -193,9 +218,9 @@ export default async function routes(app) {
       ]);
       const props = propertiesAgg[0] || { totalProperties: 0, totalVacant: 0, totalUnits: 0 };
 
-      // Fetch all tenants for the landlord (removed dueDate from select)
+      // 🔥 FIX: Fetch tenantHistory as well to properly calculate unassignment dates
       const tenants = await Tenant.find({ landlordId })
-        .select("unitId monthlyRent startingDate endingDate rentHistory electricityPerUnit startingUnit currentUnit rentChanges");
+        .select("unitId monthlyRent startingDate endingDate rentHistory electricityPerUnit startingUnit currentUnit rentChanges tenantHistory");
 
       let totalRentCollected = 0;
       let totalDue = 0;

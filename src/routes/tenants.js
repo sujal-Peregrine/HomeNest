@@ -85,7 +85,32 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   }
 
   const start = new Date(tenant.startingDate);
-  const effectiveEnd = tenant.endingDate ? new Date(tenant.endingDate) : currentDate;
+  
+  // 🔥 FIX 1: Find the actual end date from tenant history
+  // If tenant was unassigned, use the date when they were unassigned
+  let actualEndDate = tenant.endingDate ? new Date(tenant.endingDate) : null;
+  
+  // Check tenant history to find when unit/property was set to null
+  if (!actualEndDate && tenant.tenantHistory && tenant.tenantHistory.length > 0) {
+    // Find the last assignment (where property/unit is not null)
+    let lastAssignmentIndex = -1;
+    for (let i = tenant.tenantHistory.length - 1; i >= 0; i--) {
+      if (tenant.tenantHistory[i].propertyId || tenant.tenantHistory[i].unitId) {
+        lastAssignmentIndex = i;
+        break;
+      }
+    }
+    
+    // If there's a history entry after the last assignment with null values, use that date
+    if (lastAssignmentIndex !== -1 && lastAssignmentIndex < tenant.tenantHistory.length - 1) {
+      const unassignmentEntry = tenant.tenantHistory[lastAssignmentIndex + 1];
+      if (!unassignmentEntry.propertyId && !unassignmentEntry.unitId) {
+        actualEndDate = new Date(unassignmentEntry.updatedAt);
+      }
+    }
+  }
+  
+  const effectiveEnd = actualEndDate || currentDate;
 
   // Calculate rent based on days elapsed
   let totalExpectedRent = 0;
@@ -100,9 +125,8 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
     const monthRent = getRentForMonth(current.getFullYear(), current.getMonth(), rentChanges, tenant.monthlyRent);
     
     const monthStart = new Date(current);
-    const monthEnd = new Date(current.getFullYear(), current.getMonth() + 1, 0); // Last day of month
+    const monthEnd = new Date(current.getFullYear(), current.getMonth() + 1, 0);
     
-    // Determine the actual start and end dates for this month
     const actualStart = monthStart < start ? start : monthStart;
     const actualEnd = monthEnd > effectiveEnd ? effectiveEnd : monthEnd;
     const finalEnd = actualEnd > currentDate ? currentDate : actualEnd;
@@ -166,13 +190,7 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   }
 
   const totalExpected = totalExpectedRent + totalElectricityCost;
-
-  // Total paid (always include history, even if unit is removed)
-  const totalPaid = (tenant.rentHistory || []).reduce((sum, rh) => {
-    return sum + (rh.amount || 0);
-  }, 0);
-
-  // Balance
+  const totalPaid = (tenant.rentHistory || []).reduce((sum, rh) => sum + (rh.amount || 0), 0);
   const tenantBalance = totalExpected - totalPaid;
   const due = tenantBalance > 0 ? tenantBalance : 0;
   const overpaid = tenantBalance < 0 ? Math.abs(tenantBalance) : 0;
@@ -180,9 +198,9 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   // Status
   let status;
   if (!tenant.unitId && tenant.startingDate) {
-    status = "Unassigned"; // unit removed but tenant lived before
-  } else if (tenant.endingDate) {
-    status = "Inactive"; // explicitly ended
+    status = "Unassigned";
+  } else if (tenant.endingDate || actualEndDate) {
+    status = "Inactive";
   } else {
     status = due > 0 ? "Due" : "Active";
   }
@@ -344,11 +362,12 @@ export default async function routes(app) {
           body.monthlyRent && body.startingDate
             ? [{ amount: body.monthlyRent, effectiveFrom: new Date(body.startingDate) }]
             : [],
-        tenantHistory: [{
+        // 🔥 FIX: Only add tenant history if property is assigned
+        tenantHistory: (body.propertyId || body.unitId) ? [{
           propertyId: body.propertyId ? new mongoose.Types.ObjectId(body.propertyId) : null,
           unitId: body.unitId ? new mongoose.Types.ObjectId(body.unitId) : null,
-          updatedAt: body.startingDate
-        }]
+          updatedAt: body.startingDate ? new Date(body.startingDate) : new Date() // Use startingDate if available
+        }] : []
       };
 
       // Create tenant
@@ -521,22 +540,28 @@ export default async function routes(app) {
         tenant.currentUnit = body.startingUnit;
       }
 
-      // Check if property or unit changed to add history entry
-      const propertyChanged = targetPropertyId !== oldPropertyId;
-      const unitChanged = body.unitId !== undefined && (body.unitId === null || body.unitId !== oldUnitId);
-      const historyChanged = propertyChanged || unitChanged;
+      const isUnassigning = (body.unitId === null || body.propertyId === null) && 
+                         (tenant.unitId || tenant.propertyId);
 
-      Object.assign(tenant, body);
+    Object.assign(tenant, body);
+    await tenant.save();
+
+    // Check if property or unit changed to add history entry
+    const propertyChanged = targetPropertyId !== oldPropertyId;
+    const unitChanged = body.unitId !== undefined && (body.unitId === null || body.unitId !== oldUnitId);
+    const historyChanged = propertyChanged || unitChanged;
+
+    // 🔥 FIX: Add history entry with current date when unassigning, startingDate when assigning
+    if (historyChanged) {
+      const newPropertyId = body.propertyId !== undefined ? body.propertyId : tenant.propertyId;
+      const newUnitId = body.unitId !== undefined ? body.unitId : tenant.unitId;
+      
+      tenant.tenantHistory.push({
+        propertyId: newPropertyId ? new mongoose.Types.ObjectId(newPropertyId) : null,
+        unitId: newUnitId ? new mongoose.Types.ObjectId(newUnitId) : null,
+        updatedAt: isUnassigning ? new Date() : (body.startingDate ? new Date(body.startingDate) : new Date())
+      });
       await tenant.save();
-
-      // Add new history entry if changed
-      if (historyChanged) {
-        tenant.tenantHistory.push({
-          propertyId: targetPropertyId ? new mongoose.Types.ObjectId(targetPropertyId) : null,
-          unitId: body.unitId !== undefined ? (body.unitId ? new mongoose.Types.ObjectId(body.unitId) : null) : (tenant.unitId ? tenant.unitId : null),
-          updatedAt: new Date()
-        });
-        await tenant.save();
       }
 
       const populatedTenant = await Tenant.findOne({ _id: req.params.id, landlordId })

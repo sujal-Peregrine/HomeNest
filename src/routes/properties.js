@@ -59,16 +59,15 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   if (tenant.tenantHistory?.length) {
     tenant.tenantHistory = tenant.tenantHistory.map(h => ({
       ...h,
-      propertyId:
-        h.propertyId && typeof h.propertyId === "object" && h.propertyId._id
-          ? h.propertyId._id
-          : h.propertyId || null,
+      propertyId: h.propertyId && typeof h.propertyId === "object" && h.propertyId._id
+        ? h.propertyId._id
+        : h.propertyId || null,
     }));
   }
 
-  // 🚫 Case 1: Never assigned to any unit/property
+  // Case 1: Never assigned to any property
   const hasValidHistory = tenant.tenantHistory?.some(h => h.propertyId);
-  if (!tenant.unitId && !hasValidHistory) {
+  if (!tenant.propertyId && !hasValidHistory) {
     return [{
       status: "Unassigned",
       due: 0,
@@ -77,7 +76,7 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
       totalPaid: 0,
       totalExpectedRent: 0,
       totalElectricityCost: 0,
-      propertyId: tenant.propertyId || null
+      propertyId: null
     }];
   }
 
@@ -96,42 +95,70 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   }
 
   const start = new Date(tenant.startingDate);
-  const end = tenant.endingDate ? new Date(tenant.endingDate) : currentDate;
+  const globalEnd = tenant.endingDate ? new Date(tenant.endingDate) : currentDate;
 
-  // ✅ Build periods only for valid property assignments
+  // 🔥 BUILD PERIODS FROM TENANT HISTORY
   let periods = [];
   const history = (tenant.tenantHistory || [])
-    .filter(h => h.propertyId) // ignore nulls
+    .filter(h => h.propertyId) // Only valid property assignments
     .sort((a, b) => new Date(a.updatedAt) - new Date(b.updatedAt));
 
   if (history.length === 0) {
-    periods.push({
-      propertyId: tenant.propertyId,
-      startDate: start,
-      endDate: end,
-    });
-  } else {
-    let currentStart = start;
-    for (let i = 0; i < history.length; i++) {
-      const h = history[i];
-      const hStart = new Date(h.updatedAt);
-      const nextStart = i < history.length - 1 ? new Date(history[i + 1].updatedAt) : end;
-
-      periods.push({
-        propertyId: h.propertyId,
-        startDate: hStart,
-        endDate: nextStart,
-      });
-      currentStart = nextStart;
-    }
-
-    // Include active assignment if tenant still has valid property
-    const lastHistoryProperty = history[history.length - 1].propertyId;
-    if (tenant.propertyId && (!lastHistoryProperty || tenant.propertyId.toString() !== lastHistoryProperty.toString())) {
+    // No history: tenant stayed in current property from start to end
+    if (tenant.propertyId) {
       periods.push({
         propertyId: tenant.propertyId,
-        startDate: currentStart,
-        endDate: end,
+        startDate: start,
+        endDate: globalEnd,
+      });
+    }
+  } else {
+    // Build periods from history
+    for (let i = 0; i < history.length; i++) {
+      const h = history[i];
+      const periodStart = new Date(h.updatedAt);
+      
+      // Determine period end
+      let periodEnd;
+      if (i < history.length - 1) {
+        // Next history entry exists
+        periodEnd = new Date(history[i + 1].updatedAt);
+      } else {
+        // Last history entry
+        // Check if tenant is still in this property or moved/unassigned
+        if (tenant.propertyId && tenant.propertyId.toString() === h.propertyId.toString()) {
+          // Still in same property
+          periodEnd = globalEnd;
+        } else if (!tenant.propertyId) {
+          // Tenant was unassigned - find unassignment date from history
+          const nextEntry = tenant.tenantHistory.find((entry, idx) => 
+            idx > i && !entry.propertyId
+          );
+          periodEnd = nextEntry ? new Date(nextEntry.updatedAt) : globalEnd;
+        } else {
+          // Moved to different property - period ends here
+          periodEnd = periodStart;
+        }
+      }
+
+      // Only add if period has valid duration
+      if (periodStart <= periodEnd) {
+        periods.push({
+          propertyId: h.propertyId,
+          startDate: periodStart,
+          endDate: periodEnd,
+        });
+      }
+    }
+
+    // Add current property if different from last history
+    const lastHistoryProperty = history[history.length - 1].propertyId;
+    if (tenant.propertyId && tenant.propertyId.toString() !== lastHistoryProperty.toString()) {
+      const lastHistoryDate = new Date(history[history.length - 1].updatedAt);
+      periods.push({
+        propertyId: tenant.propertyId,
+        startDate: lastHistoryDate,
+        endDate: globalEnd,
       });
     }
   }
@@ -159,14 +186,16 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
     const periodStart = period.startDate;
     const periodEnd = period.endDate;
 
-    // Iterate through each month in this period
+    // Skip if period start is after current date
+    if (periodStart > currentDate) continue;
+
     let current = new Date(periodStart.getFullYear(), periodStart.getMonth(), 1);
 
     while (current <= periodEnd && current <= currentDate) {
       const monthRent = getRentForMonth(current.getFullYear(), current.getMonth(), rentChanges, tenant.monthlyRent);
 
       const monthStart = new Date(current);
-      const monthEnd = new Date(current.getFullYear(), current.getMonth() + 1, 0); // Last day of month
+      const monthEnd = new Date(current.getFullYear(), current.getMonth() + 1, 0);
 
       // Determine the actual start and end dates for this month within the period
       const actualStart = monthStart < periodStart ? periodStart : monthStart;
@@ -231,8 +260,15 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   ) {
     totalElectricityCost = (tenant.currentUnit - tenant.startingUnit) * tenant.electricityPerUnit;
   }
-  if (results.length > 0 && tenant.unitId) {
-    results[results.length - 1].totalElectricityCost += totalElectricityCost;
+  
+  // Add electricity to current property period
+  if (results.length > 0 && tenant.propertyId) {
+    const currentPropertyIndex = results.findIndex(r => 
+      r.propertyId && r.propertyId.toString() === tenant.propertyId.toString()
+    );
+    if (currentPropertyIndex !== -1) {
+      results[currentPropertyIndex].totalElectricityCost += totalElectricityCost;
+    }
   }
 
   // Distribute payments FIFO
@@ -263,7 +299,11 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
 
   // Status per period
   for (const result of results) {
-    if (tenant.propertyId && result.propertyId?.equals?.(tenant.propertyId)) {
+    const isCurrentProperty = tenant.propertyId && 
+      result.propertyId && 
+      result.propertyId.toString() === tenant.propertyId.toString();
+    
+    if (isCurrentProperty) {
       result.status = tenant.endingDate ? "Inactive" : (result.due > 0 ? "Due" : "Active");
     } else {
       result.status = "Inactive";
@@ -364,7 +404,7 @@ export default async function routes(app) {
       });
     }
   });
-  
+
   // ✅ Get Single Property
   app.get("/:id", async (req, reply) => {
     try {
@@ -506,7 +546,7 @@ export default async function routes(app) {
         .skip(skip)
         .limit(limit)
         .sort({ createdAt: -1 });
-  
+
       if (!properties.length && page === 1) {
         return reply.send({
           success: true,
@@ -519,10 +559,10 @@ export default async function routes(app) {
           }
         });
       }
-  
+
       const totalProperties = await Property.countDocuments({ landlordId });
       const propertyIds = properties.map(p => new mongoose.Types.ObjectId(p._id));
-  
+
       const tenants = await Tenant.find({
         landlordId: new mongoose.Types.ObjectId(landlordId),
         $or: [
@@ -530,14 +570,14 @@ export default async function routes(app) {
           { "tenantHistory.propertyId": { $in: propertyIds } }
         ]
       }).select("propertyId unitId monthlyRent startingDate endingDate rentHistory electricityPerUnit startingUnit currentUnit rentChanges tenantHistory");
-  
+
       // Tenant counts per property (current tenants only)
       const tenantCounts = await Tenant.aggregate([
         { $match: { landlordId: new mongoose.Types.ObjectId(landlordId), propertyId: { $in: propertyIds } } },
         { $group: { _id: "$propertyId", totalTenants: { $sum: 1 } } }
       ]);
       const tenantCountMap = Object.fromEntries(tenantCounts.map(t => [t._id.toString(), t.totalTenants]));
-  
+
       // Per-property rent aggregation
       const rentMap = {};
       for (const tenant of tenants) {
@@ -555,7 +595,7 @@ export default async function routes(app) {
           rentMap[propId].expectedElectricity += result.totalElectricityCost;
         }
       }
-  
+
       const overviewData = properties.map(p => ({
         propertyId: p._id,
         propertyName: p.name,
@@ -569,7 +609,7 @@ export default async function routes(app) {
         totalExpectedRent: rentMap[p._id.toString()]?.expectedRent || 0,
         totalExpectedElectricity: rentMap[p._id.toString()]?.expectedElectricity || 0
       }));
-  
+
       return reply.send({
         success: true,
         data: overviewData,
