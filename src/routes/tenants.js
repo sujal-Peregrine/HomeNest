@@ -932,53 +932,38 @@ export default async function routes(app) {
   });
 
   // ✅ NEW: Calculate Due with Current Electricity Unit
-  app.post("/calculate-due/:id", async (req, reply) => {
+  app.get("/calculate-due/:id", async (req, reply) => {
     try {
       const landlordId = req.user.sub;
-      const { currentElectricityUnit } = z
-        .object({
-          currentElectricityUnit: z.number().min(0).optional(),
-        })
-        .parse(req.body);
-
+  
       const tenant = await Tenant.findOne({ _id: req.params.id, landlordId })
         .populate("propertyId", "name address")
         .populate("unitId");
-
+  
       if (!tenant) {
         return reply
           .code(404)
           .send({ success: false, message: "Tenant not found" });
       }
-
+  
       const dueDetails = calculateTenantStatusAndDue(tenant);
-
+  
       // Calculate electricity due with new current unit if provided
       let newElectricityDue = dueDetails.electricityDue;
       let unitsConsumed = 0;
       let newElectricityCost = dueDetails.totalElectricityCost;
-
-      if (currentElectricityUnit !== undefined) {
-        if (tenant.electricityPerUnit != null && tenant.startingUnit != null) {
-          const lastRecordedUnit = tenant.currentUnit ?? tenant.startingUnit;
-
-          if (currentElectricityUnit < lastRecordedUnit) {
-            return reply.code(400).send({
-              success: false,
-              message:
-                "Current electricity unit cannot be less than last recorded unit",
-            });
-          }
-
-          unitsConsumed = currentElectricityUnit - tenant.startingUnit;
-          newElectricityCost = unitsConsumed * tenant.electricityPerUnit;
-
-          const electricityBalance =
-            newElectricityCost - dueDetails.totalElectricityPaid;
-          newElectricityDue = electricityBalance > 0 ? electricityBalance : 0;
-        }
+  
+      if (tenant.electricityPerUnit != null && tenant.startingUnit != null) {
+        const currentElectricityUnit = tenant.currentUnit ?? tenant.startingUnit;
+  
+        unitsConsumed = currentElectricityUnit - tenant.startingUnit;
+        newElectricityCost = unitsConsumed * tenant.electricityPerUnit;
+  
+        const electricityBalance =
+          newElectricityCost - dueDetails.totalElectricityPaid;
+        newElectricityDue = electricityBalance > 0 ? electricityBalance : 0;
       }
-
+  
       return reply.send({
         success: true,
         tenant: {
@@ -1001,10 +986,11 @@ export default async function routes(app) {
             totalPaid: dueDetails.totalElectricityPaid,
             startingUnit: tenant.startingUnit,
             lastRecordedUnit: tenant.currentUnit,
-            currentUnit: currentElectricityUnit ?? tenant.currentUnit,
-            unitsConsumed: currentElectricityUnit
-              ? currentElectricityUnit - tenant.startingUnit
-              : tenant.currentUnit - tenant.startingUnit,
+            currentUnit: tenant.currentUnit,
+            unitsConsumed:
+              tenant.currentUnit != null
+                ? tenant.currentUnit - tenant.startingUnit
+                : 0,
             perUnitCost: tenant.electricityPerUnit,
           },
           total: {
