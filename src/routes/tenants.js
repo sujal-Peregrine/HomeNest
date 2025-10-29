@@ -4,46 +4,73 @@ import Property from "../models/Property.js";
 import Unit from "../models/Unit.js";
 import Floor from "../models/Floor.js";
 import mongoose from "mongoose";
-import { nullable } from "zod/v4";
 
 const tenantSchema = z.object({
   name: z.string().min(2, "Name is required"),
   phone: z.string().regex(/^\d{10,15}$/, "Phone number must be 10–15 digits"),
-  email: z.string().email("Invalid email address").transform(e => e.toLowerCase()).optional(),
+  email: z
+    .string()
+    .email("Invalid email address")
+    .transform((e) => e.toLowerCase())
+    .optional(),
   photoUrl: z.string().url().optional(),
-  propertyId: z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid property ID").optional().nullable(),
-  unitId: z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid unit ID").nullable().optional(),
+  propertyId: z
+    .string()
+    .regex(/^[0-9a-fA-F]{24}$/, "Invalid property ID")
+    .optional()
+    .nullable(),
+  unitId: z
+    .string()
+    .regex(/^[0-9a-fA-F]{24}$/, "Invalid unit ID")
+    .nullable()
+    .optional(),
   monthlyRent: z.number().min(0).optional(),
   startingDate: z.string().datetime().optional(),
   endingDate: z.string().datetime().nullable().optional(),
   depositMoney: z.number().min(0).optional(),
-  documents: z.array(z.object({
-    type: z.string(),
-    fileUrl: z.string(),
-    fileName: z.string(),
-    uploadedAt: z.date().default(() => new Date())
-  })).optional(),
-  rentHistory: z.array(z.object({
-    amount: z.number().min(0),
-    paidAt: z.date().default(() => new Date()),
-    status: z.enum(["Paid"]).default("Paid")
-  })).optional(),
-  rentChanges: z.array(z.object({
-    amount: z.number().min(0),
-    effectiveFrom: z.string().datetime().transform(val => new Date(val))
-  })).optional(),
+  documents: z
+    .array(
+      z.object({
+        type: z.string(),
+        fileUrl: z.string(),
+        fileName: z.string(),
+        uploadedAt: z.date().default(() => new Date()),
+      })
+    )
+    .optional(),
+  rentHistory: z
+    .array(
+      z.object({
+        amount: z.number().min(0),
+        paidAt: z.date().default(() => new Date()),
+        status: z.enum(["Paid"]).default("Paid"),
+        rentType: z.enum(["flat_rent", "electricity"]).default("flat_rent"),
+        previousUnit: z.number().min(0).optional(),
+        currentUnit: z.number().min(0).optional(),
+      })
+    )
+    .optional(),
+  rentChanges: z
+    .array(
+      z.object({
+        amount: z.number().min(0),
+        effectiveFrom: z
+          .string()
+          .datetime()
+          .transform((val) => new Date(val)),
+      })
+    )
+    .optional(),
   electricityPerUnit: z.number().min(0).optional(),
   startingUnit: z.number().min(0).optional(),
-  currentUnit: z.number().min(0).optional()
+  currentUnit: z.number().min(0).optional(),
 });
 
 // Function to get applicable rent for a specific month
 function getRentForMonth(year, month, rentChanges, defaultRent) {
-  // If no rent changes, use default rent
   if (!rentChanges || rentChanges.length === 0) {
     return defaultRent || 0;
   }
-  // Rent changes must be sorted by effectiveFrom ASC
   let applicableRent = rentChanges[0].amount;
   for (const change of rentChanges) {
     const effective = new Date(change.effectiveFrom);
@@ -58,7 +85,6 @@ function getRentForMonth(year, month, rentChanges, defaultRent) {
 
 // Function to calculate tenant status, due, and overpaid amounts
 function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
-  // 🟢 Case 1: Never assigned a unit at all
   if (!tenant.unitId && !tenant.startingDate) {
     return {
       status: "Unassigned",
@@ -67,11 +93,16 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
       dueAmountDate: null,
       totalPaid: 0,
       totalExpectedRent: 0,
-      totalElectricityCost: 0
+      totalElectricityCost: 0,
+      rentDue: 0,
+      electricityDue: 0,
+      rentOverpaid: 0,
+      electricityOverpaid: 0,
+      totalRentPaid: 0,
+      totalElectricityPaid: 0,
     };
   }
 
-  // 🟢 Case 2: Missing key info
   if (!tenant.startingDate) {
     return {
       status: "Due",
@@ -80,36 +111,46 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
       dueAmountDate: null,
       totalPaid: 0,
       totalExpectedRent: 0,
-      totalElectricityCost: 0
+      totalElectricityCost: 0,
+      rentDue: 0,
+      electricityDue: 0,
+      rentOverpaid: 0,
+      electricityOverpaid: 0,
+      totalRentPaid: 0,
+      totalElectricityPaid: 0,
     };
   }
 
   const start = new Date(tenant.startingDate);
-  
-  // 🔥 FIX 1: Find the actual end date from tenant history
-  // If tenant was unassigned, use the date when they were unassigned
   let actualEndDate = tenant.endingDate ? new Date(tenant.endingDate) : null;
-  
-  // Check tenant history to find when unit/property was set to null
-  if (!actualEndDate && tenant.tenantHistory && tenant.tenantHistory.length > 0) {
-    // Find the last assignment (where property/unit is not null)
+
+  if (
+    !actualEndDate &&
+    tenant.tenantHistory &&
+    tenant.tenantHistory.length > 0
+  ) {
     let lastAssignmentIndex = -1;
     for (let i = tenant.tenantHistory.length - 1; i >= 0; i--) {
-      if (tenant.tenantHistory[i].propertyId || tenant.tenantHistory[i].unitId) {
+      if (
+        tenant.tenantHistory[i].propertyId ||
+        tenant.tenantHistory[i].unitId
+      ) {
         lastAssignmentIndex = i;
         break;
       }
     }
-    
-    // If there's a history entry after the last assignment with null values, use that date
-    if (lastAssignmentIndex !== -1 && lastAssignmentIndex < tenant.tenantHistory.length - 1) {
+
+    if (
+      lastAssignmentIndex !== -1 &&
+      lastAssignmentIndex < tenant.tenantHistory.length - 1
+    ) {
       const unassignmentEntry = tenant.tenantHistory[lastAssignmentIndex + 1];
       if (!unassignmentEntry.propertyId && !unassignmentEntry.unitId) {
         actualEndDate = new Date(unassignmentEntry.updatedAt);
       }
     }
   }
-  
+
   const effectiveEnd = actualEndDate || currentDate;
 
   // Calculate rent based on days elapsed
@@ -118,63 +159,60 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
     (a, b) => new Date(a.effectiveFrom) - new Date(b.effectiveFrom)
   );
 
-  // Iterate through each month from start to end
   let current = new Date(start.getFullYear(), start.getMonth(), 1);
-  
+
   while (current <= effectiveEnd && current <= currentDate) {
-    const monthRent = getRentForMonth(current.getFullYear(), current.getMonth(), rentChanges, tenant.monthlyRent);
-    
+    const monthRent = getRentForMonth(
+      current.getFullYear(),
+      current.getMonth(),
+      rentChanges,
+      tenant.monthlyRent
+    );
+
     const monthStart = new Date(current);
     const monthEnd = new Date(current.getFullYear(), current.getMonth() + 1, 0);
-    
+
     const actualStart = monthStart < start ? start : monthStart;
     const actualEnd = monthEnd > effectiveEnd ? effectiveEnd : monthEnd;
     const finalEnd = actualEnd > currentDate ? currentDate : actualEnd;
-    
-    // Calculate days in this billing period
+
     const daysInMonth = monthEnd.getDate();
     const startDay = actualStart.getDate();
     const endDay = finalEnd.getDate();
-    
-    // Calculate days occupied
+
     let daysOccupied;
-    if (actualStart.getMonth() === finalEnd.getMonth() && actualStart.getFullYear() === finalEnd.getFullYear()) {
-      // Same month - calculate days difference
+    if (
+      actualStart.getMonth() === finalEnd.getMonth() &&
+      actualStart.getFullYear() === finalEnd.getFullYear()
+    ) {
       daysOccupied = endDay - startDay + 1;
     } else {
-      // Full month or partial month at the end
-      if (current.getMonth() === start.getMonth() && current.getFullYear() === start.getFullYear()) {
-        // First month - from start date to end of month
+      if (
+        current.getMonth() === start.getMonth() &&
+        current.getFullYear() === start.getFullYear()
+      ) {
         daysOccupied = daysInMonth - startDay + 1;
-      } else if (current.getMonth() === finalEnd.getMonth() && current.getFullYear() === finalEnd.getFullYear()) {
-        // Last month - from start of month to current date
+      } else if (
+        current.getMonth() === finalEnd.getMonth() &&
+        current.getFullYear() === finalEnd.getFullYear()
+      ) {
         daysOccupied = endDay;
       } else {
-        // Full month in between
         daysOccupied = daysInMonth;
       }
     }
-    
-    // Apply the rent calculation logic:
-    // - If full month (all days occupied): full rent
-    // - If 16+ days: full rent
-    // - If 1-15 days: half rent
+
     let rentForThisPeriod = 0;
-    
+
     if (daysOccupied >= daysInMonth) {
-      // Full month
       rentForThisPeriod = monthRent;
     } else if (daysOccupied >= 16) {
-      // 16 or more days = full month rent
       rentForThisPeriod = monthRent;
     } else if (daysOccupied >= 1) {
-      // 1-15 days = half month rent
       rentForThisPeriod = monthRent / 2;
     }
-    
+
     totalExpectedRent += rentForThisPeriod;
-    
-    // Move to next month
     current.setMonth(current.getMonth() + 1);
   }
 
@@ -186,11 +224,34 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
     tenant.currentUnit != null &&
     tenant.currentUnit >= tenant.startingUnit
   ) {
-    totalElectricityCost = (tenant.currentUnit - tenant.startingUnit) * tenant.electricityPerUnit;
+    totalElectricityCost =
+      (tenant.currentUnit - tenant.startingUnit) * tenant.electricityPerUnit;
   }
 
+  // Calculate paid amounts separately for rent and electricity
+  const rentHistory = tenant.rentHistory || [];
+  const totalRentPaid = rentHistory
+    .filter((rh) => rh.rentType === "flat_rent" || !rh.rentType)
+    .reduce((sum, rh) => sum + (rh.amount || 0), 0);
+
+  const totalElectricityPaid = rentHistory
+    .filter((rh) => rh.rentType === "electricity")
+    .reduce((sum, rh) => sum + (rh.amount || 0), 0);
+
+  const totalPaid = totalRentPaid + totalElectricityPaid;
+
+  // Calculate separate dues
+  const rentBalance = totalExpectedRent - totalRentPaid;
+  const electricityBalance = totalElectricityCost - totalElectricityPaid;
+
+  const rentDue = rentBalance > 0 ? rentBalance : 0;
+  const rentOverpaid = rentBalance < 0 ? Math.abs(rentBalance) : 0;
+
+  const electricityDue = electricityBalance > 0 ? electricityBalance : 0;
+  const electricityOverpaid =
+    electricityBalance < 0 ? Math.abs(electricityBalance) : 0;
+
   const totalExpected = totalExpectedRent + totalElectricityCost;
-  const totalPaid = (tenant.rentHistory || []).reduce((sum, rh) => sum + (rh.amount || 0), 0);
   const tenantBalance = totalExpected - totalPaid;
   const due = tenantBalance > 0 ? tenantBalance : 0;
   const overpaid = tenantBalance < 0 ? Math.abs(tenantBalance) : 0;
@@ -205,69 +266,96 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
     status = due > 0 ? "Due" : "Active";
   }
 
-  // Calculate dueAmountDate (last day of current billing period)
   let dueAmountDate = null;
   if (due > 0) {
     dueAmountDate = currentDate.toISOString();
   }
 
-  return { 
-    status, 
-    due, 
-    overpaid, 
-    dueAmountDate, 
-    totalPaid, 
-    totalExpectedRent, 
-    totalElectricityCost 
+  return {
+    status,
+    due,
+    overpaid,
+    dueAmountDate,
+    totalPaid,
+    totalExpectedRent,
+    totalElectricityCost,
+    rentDue,
+    electricityDue,
+    rentOverpaid,
+    electricityOverpaid,
+    totalRentPaid,
+    totalElectricityPaid,
   };
 }
 
 async function updateFloorCounts(propertyId, floorId, landlordId) {
   const agg = await Unit.aggregate([
-    { $match: { propertyId: new mongoose.Types.ObjectId(propertyId), floorId: new mongoose.Types.ObjectId(floorId), landlordId: new mongoose.Types.ObjectId(landlordId) } },
+    {
+      $match: {
+        propertyId: new mongoose.Types.ObjectId(propertyId),
+        floorId: new mongoose.Types.ObjectId(floorId),
+        landlordId: new mongoose.Types.ObjectId(landlordId),
+      },
+    },
     {
       $group: {
         _id: null,
         unitsCount: { $sum: 1 },
         vacant: { $sum: { $cond: [{ $eq: ["$status", "vacant"] }, 1, 0] } },
         occupied: { $sum: { $cond: [{ $eq: ["$status", "occupied"] }, 1, 0] } },
-      }
-    }
+      },
+    },
   ]);
   const counts = agg[0] || { unitsCount: 0, vacant: 0, occupied: 0 };
   await Floor.findOneAndUpdate(
-    { _id: new mongoose.Types.ObjectId(floorId), propertyId: new mongoose.Types.ObjectId(propertyId), landlordId: new mongoose.Types.ObjectId(landlordId) },
+    {
+      _id: new mongoose.Types.ObjectId(floorId),
+      propertyId: new mongoose.Types.ObjectId(propertyId),
+      landlordId: new mongoose.Types.ObjectId(landlordId),
+    },
     {
       $set: {
         unitsCount: counts.unitsCount,
         vacant: counts.vacant,
-        occupied: counts.occupied
-      }
+        occupied: counts.occupied,
+      },
     }
   );
 }
 
 async function updatePropertyUnitCount(propertyId, landlordId) {
   const agg = await Unit.aggregate([
-    { $match: { propertyId: new mongoose.Types.ObjectId(propertyId), landlordId: new mongoose.Types.ObjectId(landlordId) } },
+    {
+      $match: {
+        propertyId: new mongoose.Types.ObjectId(propertyId),
+        landlordId: new mongoose.Types.ObjectId(landlordId),
+      },
+    },
     {
       $group: {
         _id: null,
         totalUnits: { $sum: 1 },
-        totalVacant: { $sum: { $cond: [{ $eq: ["$status", "vacant"] }, 1, 0] } },
-        totalOccupied: { $sum: { $cond: [{ $eq: ["$status", "occupied"] }, 1, 0] } },
-      }
-    }
+        totalVacant: {
+          $sum: { $cond: [{ $eq: ["$status", "vacant"] }, 1, 0] },
+        },
+        totalOccupied: {
+          $sum: { $cond: [{ $eq: ["$status", "occupied"] }, 1, 0] },
+        },
+      },
+    },
   ]);
   const counts = agg[0] || { totalUnits: 0, totalVacant: 0, totalOccupied: 0 };
   await Property.findOneAndUpdate(
-    { _id: new mongoose.Types.ObjectId(propertyId), landlordId: new mongoose.Types.ObjectId(landlordId) },
+    {
+      _id: new mongoose.Types.ObjectId(propertyId),
+      landlordId: new mongoose.Types.ObjectId(landlordId),
+    },
     {
       $set: {
         totalUnits: counts.totalUnits,
         totalVacant: counts.totalVacant,
-        totalOccupied: counts.totalOccupied
-      }
+        totalOccupied: counts.totalOccupied,
+      },
     }
   );
 }
@@ -283,50 +371,67 @@ export default async function routes(app) {
 
       let property = null;
       if (body.propertyId) {
-        // Check property exists and belongs to landlord
         property = await Property.findOne({ _id: body.propertyId, landlordId });
         if (!property) {
-          return reply.code(400).send({ success: false, message: "Invalid property" });
+          return reply
+            .code(400)
+            .send({ success: false, message: "Invalid property" });
         }
 
-        // Check for unique email within the same property (if provided)
         if (body.email) {
           const existingTenantWithEmail = await Tenant.findOne({
             email: body.email,
             propertyId: body.propertyId,
-            landlordId
+            landlordId,
           });
           if (existingTenantWithEmail) {
-            return reply.code(400).send({ success: false, message: `Email '${body.email}' is already in use by another tenant in this property` });
+            return reply
+              .code(400)
+              .send({
+                success: false,
+                message: `Email '${body.email}' is already in use by another tenant in this property`,
+              });
           }
         }
 
-        // Check for unique phone within the same property
         const existingTenantWithPhone = await Tenant.findOne({
           phone: body.phone,
           propertyId: body.propertyId,
-          landlordId
+          landlordId,
         });
         if (existingTenantWithPhone) {
-          return reply.code(400).send({ success: false, message: `Phone number '${body.phone}' is already in use by another tenant in this property` });
+          return reply
+            .code(400)
+            .send({
+              success: false,
+              message: `Phone number '${body.phone}' is already in use by another tenant in this property`,
+            });
         }
       } else {
-        // If no property, check unique phone globally
         const existingTenantWithPhone = await Tenant.findOne({
           phone: body.phone,
-          landlordId
+          landlordId,
         });
         if (existingTenantWithPhone) {
-          return reply.code(400).send({ success: false, message: `Phone number '${body.phone}' is already in use by another tenant` });
+          return reply
+            .code(400)
+            .send({
+              success: false,
+              message: `Phone number '${body.phone}' is already in use by another tenant`,
+            });
         }
-        // Check unique email globally
         if (body.email) {
           const existingTenantWithEmail = await Tenant.findOne({
             email: body.email,
-            landlordId
+            landlordId,
           });
           if (existingTenantWithEmail) {
-            return reply.code(400).send({ success: false, message: `Email '${body.email}' is already in use by another tenant` });
+            return reply
+              .code(400)
+              .send({
+                success: false,
+                message: `Email '${body.email}' is already in use by another tenant`,
+              });
           }
         }
       }
@@ -335,42 +440,71 @@ export default async function routes(app) {
       let floorId = null;
       if (body.unitId) {
         if (!body.propertyId) {
-          return reply.code(400).send({ success: false, message: "Cannot assign unit without specifying property" });
+          return reply
+            .code(400)
+            .send({
+              success: false,
+              message: "Cannot assign unit without specifying property",
+            });
         }
-        // Check unit exists under this property
-        unit = await Unit.findOne({ _id: body.unitId, propertyId: body.propertyId, landlordId });
+        unit = await Unit.findOne({
+          _id: body.unitId,
+          propertyId: body.propertyId,
+          landlordId,
+        });
         if (!unit) {
-          return reply.code(400).send({ success: false, message: "Invalid unit for this property" });
+          return reply
+            .code(400)
+            .send({
+              success: false,
+              message: "Invalid unit for this property",
+            });
         }
-        // Check if unit already assigned to a tenant
         const existingTenant = await Tenant.findOne({ unitId: body.unitId });
         if (existingTenant) {
-          return reply.code(400).send({ success: false, message: "Unit already occupied by another tenant" });
+          return reply
+            .code(400)
+            .send({
+              success: false,
+              message: "Unit already occupied by another tenant",
+            });
         }
-        // Mark unit occupied
         unit.status = "occupied";
         await unit.save();
         floorId = unit.floorId;
       }
 
-      // Prepare tenant data with initial history
       const tenantData = {
         landlordId,
         ...body,
         currentUnit: body.startingUnit || 0,
         rentChanges:
           body.monthlyRent && body.startingDate
-            ? [{ amount: body.monthlyRent, effectiveFrom: new Date(body.startingDate) }]
+            ? [
+                {
+                  amount: body.monthlyRent,
+                  effectiveFrom: new Date(body.startingDate),
+                },
+              ]
             : [],
-        // 🔥 FIX: Only add tenant history if property is assigned
-        tenantHistory: (body.propertyId || body.unitId) ? [{
-          propertyId: body.propertyId ? new mongoose.Types.ObjectId(body.propertyId) : null,
-          unitId: body.unitId ? new mongoose.Types.ObjectId(body.unitId) : null,
-          updatedAt: body.startingDate ? new Date(body.startingDate) : new Date() // Use startingDate if available
-        }] : []
+        tenantHistory:
+          body.propertyId || body.unitId
+            ? [
+                {
+                  propertyId: body.propertyId
+                    ? new mongoose.Types.ObjectId(body.propertyId)
+                    : null,
+                  unitId: body.unitId
+                    ? new mongoose.Types.ObjectId(body.unitId)
+                    : null,
+                  updatedAt: body.startingDate
+                    ? new Date(body.startingDate)
+                    : new Date(),
+                },
+              ]
+            : [],
       };
 
-      // Create tenant
       const tenant = await Tenant.create(tenantData);
 
       if (floorId && body.propertyId) {
@@ -378,24 +512,21 @@ export default async function routes(app) {
         await updatePropertyUnitCount(body.propertyId, landlordId);
       }
 
-      const { status, due, overpaid, dueAmountDate } = calculateTenantStatusAndDue(tenant);
+      const dueDetails = calculateTenantStatusAndDue(tenant);
       return reply.code(201).send({
         success: true,
         message: "Tenant created successfully",
         tenant: {
           ...tenant.toObject(),
-          status,
-          due,
-          overpaid,
-          dueAmountDate,
+          ...dueDetails,
           property,
-          unit
-        }
+          unit,
+        },
       });
     } catch (err) {
       return reply.code(400).send({
         success: false,
-        message: err.errors ? err.errors[0].message : err.message
+        message: err.errors ? err.errors[0].message : err.message,
       });
     }
   });
@@ -406,14 +537,18 @@ export default async function routes(app) {
       const landlordId = req.user.sub;
       const body = tenantSchema.partial().parse(req.body);
       const tenant = await Tenant.findOne({ _id: req.params.id, landlordId });
-      if (!tenant) return reply.code(404).send({ success: false, message: "Tenant not found" });
+      if (!tenant)
+        return reply
+          .code(404)
+          .send({ success: false, message: "Tenant not found" });
 
-      // Prevent manual update of currentUnit
       if ("currentUnit" in body) {
         delete body.currentUnit;
       }
 
-      const oldPropertyId = tenant.propertyId ? tenant.propertyId.toString() : null;
+      const oldPropertyId = tenant.propertyId
+        ? tenant.propertyId.toString()
+        : null;
       let targetPropertyId = oldPropertyId;
       let property = null;
 
@@ -421,16 +556,23 @@ export default async function routes(app) {
         if (body.propertyId === null) {
           targetPropertyId = null;
         } else {
-          property = await Property.findOne({ _id: body.propertyId, landlordId });
+          property = await Property.findOne({
+            _id: body.propertyId,
+            landlordId,
+          });
           if (!property) {
-            return reply.code(400).send({ success: false, message: "Invalid property" });
+            return reply
+              .code(400)
+              .send({ success: false, message: "Invalid property" });
           }
           targetPropertyId = body.propertyId;
         }
       }
 
-      // Check for unique email (if provided or changing property)
-      if (body.email || (body.propertyId !== undefined && targetPropertyId !== oldPropertyId)) {
+      if (
+        body.email ||
+        (body.propertyId !== undefined && targetPropertyId !== oldPropertyId)
+      ) {
         const emailToCheck = body.email || tenant.email;
         if (emailToCheck) {
           let existingTenantWithEmail;
@@ -439,24 +581,31 @@ export default async function routes(app) {
               email: emailToCheck,
               propertyId: targetPropertyId,
               landlordId,
-              _id: { $ne: tenant._id }
+              _id: { $ne: tenant._id },
             });
           } else {
             existingTenantWithEmail = await Tenant.findOne({
               email: emailToCheck,
               propertyId: null,
               landlordId,
-              _id: { $ne: tenant._id }
+              _id: { $ne: tenant._id },
             });
           }
           if (existingTenantWithEmail) {
-            return reply.code(400).send({ success: false, message: `Email '${emailToCheck}' is already in use by another tenant` });
+            return reply
+              .code(400)
+              .send({
+                success: false,
+                message: `Email '${emailToCheck}' is already in use by another tenant`,
+              });
           }
         }
       }
 
-      // Check for unique phone (similarly)
-      if (body.phone || (body.propertyId !== undefined && targetPropertyId !== oldPropertyId)) {
+      if (
+        body.phone ||
+        (body.propertyId !== undefined && targetPropertyId !== oldPropertyId)
+      ) {
         const phoneToCheck = body.phone || tenant.phone;
         let existingTenantWithPhone;
         if (targetPropertyId) {
@@ -464,18 +613,23 @@ export default async function routes(app) {
             phone: phoneToCheck,
             propertyId: targetPropertyId,
             landlordId,
-            _id: { $ne: tenant._id }
+            _id: { $ne: tenant._id },
           });
         } else {
           existingTenantWithPhone = await Tenant.findOne({
             phone: phoneToCheck,
             propertyId: null,
             landlordId,
-            _id: { $ne: tenant._id }
+            _id: { $ne: tenant._id },
           });
         }
         if (existingTenantWithPhone) {
-          return reply.code(400).send({ success: false, message: `Phone number '${phoneToCheck}' is already in use by another tenant` });
+          return reply
+            .code(400)
+            .send({
+              success: false,
+              message: `Phone number '${phoneToCheck}' is already in use by another tenant`,
+            });
         }
       }
 
@@ -485,7 +639,6 @@ export default async function routes(app) {
 
       if (body.unitId !== undefined) {
         if (body.unitId === null) {
-          // Unassign unit
           if (oldUnitId) {
             const oldUnit = await Unit.findOne({ _id: oldUnitId, landlordId });
             if (oldUnit) {
@@ -496,28 +649,51 @@ export default async function routes(app) {
           }
         } else {
           if (!targetPropertyId) {
-            return reply.code(400).send({ success: false, message: "Cannot assign unit without a property" });
+            return reply
+              .code(400)
+              .send({
+                success: false,
+                message: "Cannot assign unit without a property",
+              });
           }
           if (body.unitId === oldUnitId) {
             // No change
           } else {
-            // Vacate old unit if exists
             if (oldUnitId) {
-              const oldUnit = await Unit.findOne({ _id: oldUnitId, landlordId });
+              const oldUnit = await Unit.findOne({
+                _id: oldUnitId,
+                landlordId,
+              });
               if (oldUnit) {
                 oldUnit.status = "vacant";
                 await oldUnit.save();
                 oldFloorId = oldUnit.floorId.toString();
               }
             }
-            // Assign new unit
-            const newUnit = await Unit.findOne({ _id: body.unitId, propertyId: targetPropertyId, landlordId });
+            const newUnit = await Unit.findOne({
+              _id: body.unitId,
+              propertyId: targetPropertyId,
+              landlordId,
+            });
             if (!newUnit) {
-              return reply.code(400).send({ success: false, message: "Invalid new unit for this property" });
+              return reply
+                .code(400)
+                .send({
+                  success: false,
+                  message: "Invalid new unit for this property",
+                });
             }
-            const existingTenant = await Tenant.findOne({ unitId: body.unitId, _id: { $ne: req.params.id } });
+            const existingTenant = await Tenant.findOne({
+              unitId: body.unitId,
+              _id: { $ne: req.params.id },
+            });
             if (existingTenant) {
-              return reply.code(400).send({ success: false, message: "New unit already occupied by another tenant" });
+              return reply
+                .code(400)
+                .send({
+                  success: false,
+                  message: "New unit already occupied by another tenant",
+                });
             }
             newUnit.status = "occupied";
             await newUnit.save();
@@ -525,7 +701,6 @@ export default async function routes(app) {
           }
         }
       } else if (targetPropertyId !== oldPropertyId && oldUnitId) {
-        // If changing property without touching unit, force unassign unit
         const oldUnit = await Unit.findOne({ _id: oldUnitId, landlordId });
         if (oldUnit) {
           oldUnit.status = "vacant";
@@ -535,40 +710,50 @@ export default async function routes(app) {
         body.unitId = null;
       }
 
-      // If updating startingUnit and currentUnit not set yet, sync it
       if (body.startingUnit !== undefined && tenant.currentUnit === undefined) {
         tenant.currentUnit = body.startingUnit;
       }
 
-      const isUnassigning = (body.unitId === null || body.propertyId === null) && 
-                         (tenant.unitId || tenant.propertyId);
+      const isUnassigning =
+        (body.unitId === null || body.propertyId === null) &&
+        (tenant.unitId || tenant.propertyId);
 
-    Object.assign(tenant, body);
-    await tenant.save();
-
-    // Check if property or unit changed to add history entry
-    const propertyChanged = targetPropertyId !== oldPropertyId;
-    const unitChanged = body.unitId !== undefined && (body.unitId === null || body.unitId !== oldUnitId);
-    const historyChanged = propertyChanged || unitChanged;
-
-    // 🔥 FIX: Add history entry with current date when unassigning, startingDate when assigning
-    if (historyChanged) {
-      const newPropertyId = body.propertyId !== undefined ? body.propertyId : tenant.propertyId;
-      const newUnitId = body.unitId !== undefined ? body.unitId : tenant.unitId;
-      
-      tenant.tenantHistory.push({
-        propertyId: newPropertyId ? new mongoose.Types.ObjectId(newPropertyId) : null,
-        unitId: newUnitId ? new mongoose.Types.ObjectId(newUnitId) : null,
-        updatedAt: isUnassigning ? new Date() : (body.startingDate ? new Date(body.startingDate) : new Date())
-      });
+      Object.assign(tenant, body);
       await tenant.save();
+
+      const propertyChanged = targetPropertyId !== oldPropertyId;
+      const unitChanged =
+        body.unitId !== undefined &&
+        (body.unitId === null || body.unitId !== oldUnitId);
+      const historyChanged = propertyChanged || unitChanged;
+
+      if (historyChanged) {
+        const newPropertyId =
+          body.propertyId !== undefined ? body.propertyId : tenant.propertyId;
+        const newUnitId =
+          body.unitId !== undefined ? body.unitId : tenant.unitId;
+
+        tenant.tenantHistory.push({
+          propertyId: newPropertyId
+            ? new mongoose.Types.ObjectId(newPropertyId)
+            : null,
+          unitId: newUnitId ? new mongoose.Types.ObjectId(newUnitId) : null,
+          updatedAt: isUnassigning
+            ? new Date()
+            : body.startingDate
+            ? new Date(body.startingDate)
+            : new Date(),
+        });
+        await tenant.save();
       }
 
-      const populatedTenant = await Tenant.findOne({ _id: req.params.id, landlordId })
+      const populatedTenant = await Tenant.findOne({
+        _id: req.params.id,
+        landlordId,
+      })
         .populate("propertyId", "name address")
         .populate("unitId");
 
-      // Update counts
       if (oldFloorId && oldPropertyId) {
         await updateFloorCounts(oldPropertyId, oldFloorId, landlordId);
       }
@@ -584,11 +769,11 @@ export default async function routes(app) {
         }
       }
 
-      const { status, due, overpaid, dueAmountDate } = calculateTenantStatusAndDue(populatedTenant);
+      const dueDetails = calculateTenantStatusAndDue(populatedTenant);
       return reply.send({
         success: true,
         message: "Tenant updated successfully",
-        tenant: { ...populatedTenant.toObject(), status, due, overpaid, dueAmountDate }
+        tenant: { ...populatedTenant.toObject(), ...dueDetails },
       });
     } catch (err) {
       return reply.code(400).send({
@@ -603,7 +788,10 @@ export default async function routes(app) {
     try {
       const landlordId = req.user.sub;
       const tenant = await Tenant.findOne({ _id: req.params.id, landlordId });
-      if (!tenant) return reply.code(404).send({ success: false, message: "Tenant not found" });
+      if (!tenant)
+        return reply
+          .code(404)
+          .send({ success: false, message: "Tenant not found" });
 
       if (tenant.unitId && tenant.propertyId) {
         const unit = await Unit.findOne({ _id: tenant.unitId, landlordId });
@@ -616,7 +804,10 @@ export default async function routes(app) {
       }
 
       await tenant.deleteOne();
-      return reply.send({ success: true, message: "Tenant deleted successfully" });
+      return reply.send({
+        success: true,
+        message: "Tenant deleted successfully",
+      });
     } catch (err) {
       return reply.code(400).send({
         success: false,
@@ -625,21 +816,19 @@ export default async function routes(app) {
     }
   });
 
-  // ✅ List Tenants (with property info)
+  // ✅ List Tenants
   app.get("/", async (req, reply) => {
     try {
       const landlordId = req.user.sub;
-  
-      // Parse query parameters for pagination
+
       const querySchema = z.object({
         page: z.string().regex(/^\d+$/).default("1").transform(Number),
-        limit: z.string().regex(/^\d+$/).default("10").transform(Number)
+        limit: z.string().regex(/^\d+$/).default("10").transform(Number),
       });
       const { page, limit } = querySchema.parse(req.query);
-  
+
       const skip = (page - 1) * limit;
 
-      // Fetch tenants with pagination
       const tenants = await Tenant.find({ landlordId })
         .sort({ createdAt: -1 })
         .skip(skip)
@@ -650,10 +839,9 @@ export default async function routes(app) {
       const totalTenants = await Tenant.countDocuments({ landlordId });
       const totalPages = Math.ceil(totalTenants / limit);
 
-      // Enrich tenants manually
-      const enrichedTenants = tenants.map(t => {
-        const { status, due, overpaid, dueAmountDate, totalpaid,totalExpectedRent,totalElectricityCost  } = calculateTenantStatusAndDue(t);
-        return { ...t.toObject(), status, due, overpaid, dueAmountDate, totalExpectedRent, totalpaid, totalElectricityCost };
+      const enrichedTenants = tenants.map((t) => {
+        const dueDetails = calculateTenantStatusAndDue(t);
+        return { ...t.toObject(), ...dueDetails };
       });
 
       return reply.send({
@@ -664,14 +852,14 @@ export default async function routes(app) {
           page,
           limit,
           totalPages,
-          totalItems: totalTenants
-        }
+          totalItems: totalTenants,
+        },
       });
     } catch (err) {
       return reply.code(500).send({
         success: false,
         message: "Failed to fetch tenants",
-        error: err.message
+        error: err.message,
       });
     }
   });
@@ -680,29 +868,29 @@ export default async function routes(app) {
   app.get("/unassigned", async (req, reply) => {
     try {
       const landlordId = req.user.sub;
-  
-      // Parse query parameters for pagination
+
       const querySchema = z.object({
         page: z.string().regex(/^\d+$/).default("1").transform(Number),
-        limit: z.string().regex(/^\d+$/).default("10").transform(Number)
+        limit: z.string().regex(/^\d+$/).default("10").transform(Number),
       });
       const { page, limit } = querySchema.parse(req.query);
-  
+
       const skip = (page - 1) * limit;
 
-      // Fetch unassigned tenants with pagination
       const tenants = await Tenant.find({ landlordId, propertyId: null })
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit);
 
-      const totalTenants = await Tenant.countDocuments({ landlordId, propertyId: null });
+      const totalTenants = await Tenant.countDocuments({
+        landlordId,
+        propertyId: null,
+      });
       const totalPages = Math.ceil(totalTenants / limit);
 
-      // Enrich tenants manually
-      const enrichedTenants = tenants.map(t => {
-        const { status, due, overpaid } = calculateTenantStatusAndDue(t);
-        return { ...t.toObject(), status, due, overpaid };
+      const enrichedTenants = tenants.map((t) => {
+        const dueDetails = calculateTenantStatusAndDue(t);
+        return { ...t.toObject(), ...dueDetails };
       });
 
       return reply.send({
@@ -713,14 +901,14 @@ export default async function routes(app) {
           page,
           limit,
           totalPages,
-          totalItems: totalTenants
-        }
+          totalItems: totalTenants,
+        },
       });
     } catch (err) {
       return reply.code(500).send({
         success: false,
         message: "Failed to fetch unassigned tenants",
-        error: err.message
+        error: err.message,
       });
     }
   });
@@ -731,33 +919,133 @@ export default async function routes(app) {
     const tenant = await Tenant.findOne({ _id: req.params.id, landlordId })
       .populate("propertyId", "name address")
       .populate("unitId");
-    if (!tenant) return reply.code(404).send({ success: false, message: "Tenant not found" });
+    if (!tenant)
+      return reply
+        .code(404)
+        .send({ success: false, message: "Tenant not found" });
 
-    const { status, due, overpaid, dueAmountDate, totalpaid,totalExpectedRent,totalElectricityCost  } = calculateTenantStatusAndDue(tenant);
+    const dueDetails = calculateTenantStatusAndDue(tenant);
     return reply.send({
       success: true,
-      tenant: { ...tenant.toObject(), status, due, overpaid, dueAmountDate ,totalpaid,totalExpectedRent,totalElectricityCost}
+      tenant: { ...tenant.toObject(), ...dueDetails },
     });
   });
 
-  // ✅ Get Tenant Due and Overpaid Amounts
+  // ✅ NEW: Calculate Due with Current Electricity Unit
+  app.post("/calculate-due/:id", async (req, reply) => {
+    try {
+      const landlordId = req.user.sub;
+      const { currentElectricityUnit } = z
+        .object({
+          currentElectricityUnit: z.number().min(0).optional(),
+        })
+        .parse(req.body);
+
+      const tenant = await Tenant.findOne({ _id: req.params.id, landlordId })
+        .populate("propertyId", "name address")
+        .populate("unitId");
+
+      if (!tenant) {
+        return reply
+          .code(404)
+          .send({ success: false, message: "Tenant not found" });
+      }
+
+      const dueDetails = calculateTenantStatusAndDue(tenant);
+
+      // Calculate electricity due with new current unit if provided
+      let newElectricityDue = dueDetails.electricityDue;
+      let unitsConsumed = 0;
+      let newElectricityCost = dueDetails.totalElectricityCost;
+
+      if (currentElectricityUnit !== undefined) {
+        if (tenant.electricityPerUnit != null && tenant.startingUnit != null) {
+          const lastRecordedUnit = tenant.currentUnit ?? tenant.startingUnit;
+
+          if (currentElectricityUnit < lastRecordedUnit) {
+            return reply.code(400).send({
+              success: false,
+              message:
+                "Current electricity unit cannot be less than last recorded unit",
+            });
+          }
+
+          unitsConsumed = currentElectricityUnit - tenant.startingUnit;
+          newElectricityCost = unitsConsumed * tenant.electricityPerUnit;
+
+          const electricityBalance =
+            newElectricityCost - dueDetails.totalElectricityPaid;
+          newElectricityDue = electricityBalance > 0 ? electricityBalance : 0;
+        }
+      }
+
+      return reply.send({
+        success: true,
+        tenant: {
+          id: tenant._id,
+          name: tenant.name,
+          property: tenant.propertyId,
+          unit: tenant.unitId,
+        },
+        dues: {
+          flatRent: {
+            due: dueDetails.rentDue,
+            overpaid: dueDetails.rentOverpaid,
+            totalExpected: dueDetails.totalExpectedRent,
+            totalPaid: dueDetails.totalRentPaid,
+          },
+          electricity: {
+            due: newElectricityDue,
+            overpaid: dueDetails.electricityOverpaid,
+            totalExpected: newElectricityCost,
+            totalPaid: dueDetails.totalElectricityPaid,
+            startingUnit: tenant.startingUnit,
+            lastRecordedUnit: tenant.currentUnit,
+            currentUnit: currentElectricityUnit ?? tenant.currentUnit,
+            unitsConsumed: currentElectricityUnit
+              ? currentElectricityUnit - tenant.startingUnit
+              : tenant.currentUnit - tenant.startingUnit,
+            perUnitCost: tenant.electricityPerUnit,
+          },
+          total: {
+            due: dueDetails.rentDue + newElectricityDue,
+            overpaid: dueDetails.rentOverpaid + dueDetails.electricityOverpaid,
+          },
+        },
+      });
+    } catch (err) {
+      return reply.code(400).send({
+        success: false,
+        message: err.message,
+      });
+    }
+  });
+
+  // ✅ Get Tenant Due and Overpaid Amounts (Legacy)
   app.get("/due/:id", async (req, reply) => {
     try {
       const landlordId = req.user.sub;
       const tenant = await Tenant.findOne({ _id: req.params.id, landlordId });
-      if (!tenant) return reply.code(404).send({ success: false, message: "Tenant not found" });
+      if (!tenant)
+        return reply
+          .code(404)
+          .send({ success: false, message: "Tenant not found" });
 
-      const { due, overpaid, dueAmountDate } = calculateTenantStatusAndDue(tenant);
+      const dueDetails = calculateTenantStatusAndDue(tenant);
       return reply.send({
         success: true,
-        due,
-        dueAmountDate,
-        overpaid
+        due: dueDetails.due,
+        dueAmountDate: dueDetails.dueAmountDate,
+        overpaid: dueDetails.overpaid,
+        rentDue: dueDetails.rentDue,
+        electricityDue: dueDetails.electricityDue,
+        rentOverpaid: dueDetails.rentOverpaid,
+        electricityOverpaid: dueDetails.electricityOverpaid,
       });
     } catch (err) {
       return reply.code(500).send({
         success: false,
-        message: err.message
+        message: err.message,
       });
     }
   });
@@ -767,15 +1055,21 @@ export default async function routes(app) {
     const landlordId = req.user.sub;
     const { type, fileUrl, fileName } = req.body || {};
     const tenant = await Tenant.findOne({ _id: req.params.id, landlordId });
-    if (!tenant) return reply.code(404).send({ success: false, message: "Tenant not found" });
-    if (tenant.documents.length >= 5) return reply.code(400).send({ success: false, message: "Max 5 documents" });
+    if (!tenant)
+      return reply
+        .code(404)
+        .send({ success: false, message: "Tenant not found" });
+    if (tenant.documents.length >= 5)
+      return reply
+        .code(400)
+        .send({ success: false, message: "Max 5 documents" });
     tenant.documents.push({ type, fileUrl, fileName, uploadedAt: new Date() });
     await tenant.save();
 
-    const { status, due, overpaid, dueAmountDate } = calculateTenantStatusAndDue(tenant);
+    const dueDetails = calculateTenantStatusAndDue(tenant);
     return reply.send({
       success: true,
-      tenant: { ...tenant.toObject(), status, due, overpaid, dueAmountDate }
+      tenant: { ...tenant.toObject(), ...dueDetails },
     });
   });
 
@@ -783,7 +1077,10 @@ export default async function routes(app) {
   app.delete("/:id/documents/:idx", async (req, reply) => {
     const landlordId = req.user.sub;
     const tenant = await Tenant.findOne({ _id: req.params.id, landlordId });
-    if (!tenant) return reply.code(404).send({ success: false, message: "Tenant not found" });
+    if (!tenant)
+      return reply
+        .code(404)
+        .send({ success: false, message: "Tenant not found" });
     const idx = parseInt(req.params.idx, 10);
     if (Number.isNaN(idx) || idx < 0 || idx >= tenant.documents.length) {
       return reply.code(400).send({ success: false, message: "Invalid index" });
@@ -791,34 +1088,150 @@ export default async function routes(app) {
     tenant.documents.splice(idx, 1);
     await tenant.save();
 
-    const { status, due, overpaid, dueAmountDate } = calculateTenantStatusAndDue(tenant);
+    const dueDetails = calculateTenantStatusAndDue(tenant);
     return reply.send({
       success: true,
-      tenant: { ...tenant.toObject(), status, due, overpaid, dueAmountDate }
+      tenant: { ...tenant.toObject(), ...dueDetails },
     });
   });
 
-  // ✅ Add Rent Payment
+  // ✅ NEW: Pay Rent (Separate Flat Rent and Electricity)
+  app.post("/pay-rent/:id", async (req, reply) => {
+    try {
+      const landlordId = req.user.sub;
+      const {
+        flatRentAmount,
+        electricityAmount,
+        currentElectricityUnit,
+        transactionDate,
+      } = z
+        .object({
+          flatRentAmount: z.number().min(0).optional(),
+          electricityAmount: z.number().min(0).optional(),
+          currentElectricityUnit: z.number().min(0).optional(),
+          transactionDate: z.string().datetime().optional(),
+        })
+        .parse(req.body);
+
+      if (!flatRentAmount && !electricityAmount) {
+        return reply.code(400).send({
+          success: false,
+          message:
+            "At least one payment amount (flatRentAmount or electricityAmount) is required",
+        });
+      }
+
+      const tenant = await Tenant.findOne({ _id: req.params.id, landlordId });
+      if (!tenant)
+        return reply
+          .code(404)
+          .send({ success: false, message: "Tenant not found" });
+
+      const paymentDate = transactionDate
+        ? new Date(transactionDate)
+        : new Date();
+
+      // Pay flat rent
+      if (flatRentAmount && flatRentAmount > 0) {
+        tenant.rentHistory.push({
+          amount: flatRentAmount,
+          status: "Paid",
+          paidAt: paymentDate,
+          rentType: "flat_rent",
+        });
+      }
+
+      // Pay electricity with unit tracking
+      if (electricityAmount && electricityAmount > 0) {
+        let previousUnit;
+        if (tenant.currentUnit && tenant.currentUnit > 0) {
+          previousUnit = tenant.currentUnit;
+        } else {
+          previousUnit = tenant.startingUnit ?? 0; // fallback if both missing
+        }
+        let newCurrentUnit = previousUnit;
+
+        // Update current unit if provided
+        if (currentElectricityUnit !== undefined) {
+          if (
+            tenant.electricityPerUnit !== undefined &&
+            tenant.startingUnit !== undefined
+          ) {
+            if (currentElectricityUnit < previousUnit) {
+              return reply.code(400).send({
+                success: false,
+                message:
+                  "Current electricity unit cannot be less than last recorded unit",
+              });
+            }
+            newCurrentUnit = currentElectricityUnit;
+            tenant.currentUnit = newCurrentUnit;
+          }
+        }
+
+        tenant.rentHistory.push({
+          amount: electricityAmount,
+          status: "Paid",
+          paidAt: paymentDate,
+          rentType: "electricity",
+          previousUnit: previousUnit,
+          currentUnit: newCurrentUnit,
+        });
+      }
+
+      await tenant.save();
+
+      const populatedTenant = await Tenant.findOne({
+        _id: req.params.id,
+        landlordId,
+      })
+        .populate("propertyId", "name address")
+        .populate("unitId");
+
+      const dueDetails = calculateTenantStatusAndDue(populatedTenant);
+      return reply.send({
+        success: true,
+        message: "Payment recorded successfully",
+        tenant: { ...populatedTenant.toObject(), ...dueDetails },
+      });
+    } catch (err) {
+      return reply.code(400).send({
+        success: false,
+        message: err.message,
+      });
+    }
+  });
+
+  // ✅ LEGACY: Add Rent Payment (kept for backward compatibility)
   app.post("/rent/:id", async (req, reply) => {
     try {
       const landlordId = req.user.sub;
-      const { amount, transactionDate, currentElectricityUnit } = z.object({
-        amount: z.number().min(0),
-        transactionDate: z.string().datetime().optional(),
-        currentElectricityUnit: z.number().min(0).optional()
-      }).parse(req.body);
+      const { amount, transactionDate, currentElectricityUnit } = z
+        .object({
+          amount: z.number().min(0),
+          transactionDate: z.string().datetime().optional(),
+          currentElectricityUnit: z.number().min(0).optional(),
+        })
+        .parse(req.body);
 
       const tenant = await Tenant.findOne({ _id: req.params.id, landlordId });
-      if (!tenant) return reply.code(404).send({ success: false, message: "Tenant not found" });
+      if (!tenant)
+        return reply
+          .code(404)
+          .send({ success: false, message: "Tenant not found" });
 
       // Handle electricity unit update if provided
       if (currentElectricityUnit !== undefined) {
-        if (tenant.electricityPerUnit !== undefined && tenant.startingUnit !== undefined) {
+        if (
+          tenant.electricityPerUnit !== undefined &&
+          tenant.startingUnit !== undefined
+        ) {
           tenant.currentUnit = tenant.currentUnit ?? tenant.startingUnit;
           if (currentElectricityUnit < tenant.currentUnit) {
             return reply.code(400).send({
               success: false,
-              message: "Current electricity unit cannot be less than last reading"
+              message:
+                "Current electricity unit cannot be less than last reading",
             });
           }
           tenant.currentUnit = currentElectricityUnit;
@@ -828,75 +1241,92 @@ export default async function routes(app) {
       tenant.rentHistory.push({
         amount,
         status: "Paid",
-        paidAt: transactionDate ? new Date(transactionDate) : new Date()
+        paidAt: transactionDate ? new Date(transactionDate) : new Date(),
+        rentType: "flat_rent",
       });
       await tenant.save();
 
-      const populatedTenant = await Tenant.findOne({ _id: req.params.id, landlordId })
+      const populatedTenant = await Tenant.findOne({
+        _id: req.params.id,
+        landlordId,
+      })
         .populate("propertyId", "name address")
         .populate("unitId");
 
-      const { status, due, overpaid, dueAmountDate } = calculateTenantStatusAndDue(populatedTenant);
+      const dueDetails = calculateTenantStatusAndDue(populatedTenant);
       return reply.send({
         success: true,
         message: "Rent payment recorded successfully",
-        tenant: { ...populatedTenant.toObject(), status, due, overpaid, dueAmountDate }
+        tenant: { ...populatedTenant.toObject(), ...dueDetails },
       });
     } catch (err) {
       return reply.code(400).send({
         success: false,
-        message: err.message
+        message: err.message,
       });
     }
   });
 
-  // Increase Rent for Tenant
+  // ✅ Increase Rent for Tenant
   app.post("/rent-increase/:id", async (req, reply) => {
     try {
       const landlordId = req.user.sub;
-      const { amount, effectiveFrom } = z.object({
-        amount: z.number().min(0),
-        effectiveFrom: z.string().datetime()
-      }).parse(req.body);
+      const { amount, effectiveFrom } = z
+        .object({
+          amount: z.number().min(0),
+          effectiveFrom: z.string().datetime(),
+        })
+        .parse(req.body);
       const tenant = await Tenant.findOne({ _id: req.params.id, landlordId });
       if (!tenant) {
-        return reply.code(404).send({ success: false, message: "Tenant not found" });
+        return reply
+          .code(404)
+          .send({ success: false, message: "Tenant not found" });
       }
-      if (tenant.startingDate && new Date(effectiveFrom) < new Date(tenant.startingDate)) {
+      if (
+        tenant.startingDate &&
+        new Date(effectiveFrom) < new Date(tenant.startingDate)
+      ) {
         return reply.code(400).send({
           success: false,
-          message: "Rent change effective date cannot be before tenant start date"
+          message:
+            "Rent change effective date cannot be before tenant start date",
         });
       }
       tenant.rentChanges = tenant.rentChanges || [];
-      const alreadyExists = tenant.rentChanges.some(rc =>
-        new Date(rc.effectiveFrom).toISOString() === new Date(effectiveFrom).toISOString()
+      const alreadyExists = tenant.rentChanges.some(
+        (rc) =>
+          new Date(rc.effectiveFrom).toISOString() ===
+          new Date(effectiveFrom).toISOString()
       );
       if (alreadyExists) {
         return reply.code(400).send({
           success: false,
-          message: "A rent change already exists for this effective date"
+          message: "A rent change already exists for this effective date",
         });
       }
       tenant.rentChanges.push({
         amount,
-        effectiveFrom: new Date(effectiveFrom)
+        effectiveFrom: new Date(effectiveFrom),
       });
       tenant.monthlyRent = amount;
       await tenant.save();
-      const populatedTenant = await Tenant.findOne({ _id: req.params.id, landlordId })
+      const populatedTenant = await Tenant.findOne({
+        _id: req.params.id,
+        landlordId,
+      })
         .populate("propertyId", "name address")
         .populate("unitId");
-      const { status, due, overpaid, dueAmountDate } = calculateTenantStatusAndDue(populatedTenant);
+      const dueDetails = calculateTenantStatusAndDue(populatedTenant);
       return reply.send({
         success: true,
         message: "Rent increased successfully",
-        tenant: { ...populatedTenant.toObject(), status, due, overpaid, dueAmountDate }
+        tenant: { ...populatedTenant.toObject(), ...dueDetails },
       });
     } catch (err) {
       return reply.code(400).send({
         success: false,
-        message: err.message
+        message: err.message,
       });
     }
   });

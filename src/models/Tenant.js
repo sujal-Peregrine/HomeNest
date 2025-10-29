@@ -11,10 +11,13 @@ const Document = new Schema({
 const RentHistory = new Schema({
   amount: { type: Number, required: true },
   paidAt: { type: Date, default: Date.now },
-  status: { type: String, enum: ["Paid"], default: "Paid" } 
+  status: { type: String, enum: ["Paid"], default: "Paid" },
+  rentType: { type: String, enum: ["flat_rent", "electricity"], default: "flat_rent" },
+  previousUnit: { type: Number, min: 0 }, // For electricity payments - previous meter reading
+  currentUnit: { type: Number, min: 0 }   // For electricity payments - current meter reading
 }, { _id: false });
 
-const rentChanges =new Schema({
+const rentChanges = new Schema({
   amount: { type: Number, required: true },
   effectiveFrom: { type: Date, default: Date.now },
 }, { _id: false });
@@ -51,7 +54,7 @@ const TenantSchema = new Schema(
     depositMoney: { type: Number, default: 0 },
     documents: [Document],
     rentHistory: [RentHistory],
-    rentChanges:[rentChanges],
+    rentChanges: [rentChanges],
     tenantHistory: [TenantHistory],
     electricityPerUnit: { type: Number, default: 0 }, // Cost per electricity unit
     startingUnit: { type: Number, default: 0 }, // Initial electricity meter reading
