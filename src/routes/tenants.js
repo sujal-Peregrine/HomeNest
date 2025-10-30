@@ -966,12 +966,7 @@ export default async function routes(app) {
   
       return reply.send({
         success: true,
-        tenant: {
-          id: tenant._id,
-          name: tenant.name,
-          property: tenant.propertyId,
-          unit: tenant.unitId,
-        },
+        tenant,
         dues: {
           flatRent: {
             due: dueDetails.rentDue,
@@ -1316,4 +1311,84 @@ export default async function routes(app) {
       });
     }
   });
+  app.post("/calculate-electricity-due/:id", async (req, reply) => {
+    try {
+      const landlordId = req.user.sub;
+      const { currentUnit } = z
+        .object({
+          currentUnit: z.number().min(0, "Current unit must be non-negative"),
+        })
+        .parse(req.body);
+
+      const tenant = await Tenant.findOne({ _id: req.params.id, landlordId });
+
+      if (!tenant) {
+        return reply
+          .code(404)
+          .send({ success: false, message: "Tenant not found" });
+      }
+
+      // Validate electricity setup
+      if (
+        tenant.electricityPerUnit == null ||
+        tenant.startingUnit == null
+      ) {
+        return reply.code(400).send({
+          success: false,
+          message: "Tenant does not have electricity tracking configured",
+        });
+      }
+
+      // Determine the minimum allowed unit (either currentUnit or startingUnit)
+      const lastRecordedUnit = tenant.currentUnit ?? tenant.startingUnit;
+      
+      // Validate provided unit is not less than the last recorded unit
+      if (currentUnit < lastRecordedUnit) {
+        return reply.code(400).send({
+          success: false,
+          message: `Current unit (${currentUnit}) cannot be less than last recorded unit (${lastRecordedUnit})`,
+        });
+      }
+
+      // Calculate electricity consumption and cost
+      const unitsConsumed = currentUnit - tenant.startingUnit;
+      const totalElectricityCost = unitsConsumed * tenant.electricityPerUnit;
+
+      // Calculate total electricity paid from rent history
+      const totalElectricityPaid = (tenant.rentHistory || [])
+        .filter((rh) => rh.rentType === "electricity")
+        .reduce((sum, rh) => sum + (rh.amount || 0), 0);
+
+      // Calculate due/overpaid
+      const electricityBalance = totalElectricityCost - totalElectricityPaid;
+      const electricityDue = electricityBalance > 0 ? electricityBalance : 0;
+      const electricityOverpaid =
+        electricityBalance < 0 ? Math.abs(electricityBalance) : 0;
+
+      return reply.send({
+        success: true,
+        tenant: {
+          id: tenant._id,
+          name: tenant.name,
+        },
+        electricity: {
+          startingUnit: tenant.startingUnit,
+          lastRecordedUnit: tenant.currentUnit,
+          providedCurrentUnit: currentUnit,
+          unitsConsumed: unitsConsumed,
+          perUnitCost: tenant.electricityPerUnit,
+          totalCost: totalElectricityCost,
+          totalPaid: totalElectricityPaid,
+          due: electricityDue,
+          overpaid: electricityOverpaid,
+        },
+      });
+    } catch (err) {
+      return reply.code(400).send({
+        success: false,
+        message: err.message,
+      });
+    }
+  });
+
 }
