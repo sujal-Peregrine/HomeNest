@@ -6,19 +6,26 @@ import Tenant from "../models/Tenant.js";
 import mongoose from "mongoose";
 
 const propertySchema = z.object({
-  name: z.string({ required_error: "Property name is required" }).min(1, "Property name cannot be empty"),
-  address: z.object({
-    line1: z.string().optional(),
-    line2: z.string().optional(),
-    city: z.string().optional(),
-    state: z.string().optional(),
-    zip: z.string().optional(),
-    country: z.string().optional(),
-  }).optional(),
-  floors: z.number({
-    required_error: "Number of floors is required",
-    invalid_type_error: "Floors must be a number",
-  }).int("Floors must be an integer").min(1, "Floors must be at least 1"),
+  name: z
+    .string({ required_error: "Property name is required" })
+    .min(1, "Property name cannot be empty"),
+  address: z
+    .object({
+      line1: z.string().optional(),
+      line2: z.string().optional(),
+      city: z.string().optional(),
+      state: z.string().optional(),
+      zip: z.string().optional(),
+      country: z.string().optional(),
+    })
+    .optional(),
+  floors: z
+    .number({
+      required_error: "Number of floors is required",
+      invalid_type_error: "Floors must be a number",
+    })
+    .int("Floors must be an integer")
+    .min(1, "Floors must be at least 1"),
 });
 // Update schema without floors to prevent changing floor count
 const updateSchema = propertySchema.omit({ floors: true }).partial();
@@ -50,57 +57,68 @@ function getRentForMonth(year, month, rentChanges, defaultRent) {
 // Updated calculation function without dueDate concept
 function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   // Case 1: never assigned to any unit/property
-  if (tenant.propertyId && typeof tenant.propertyId === "object" && tenant.propertyId._id) {
+  if (
+    tenant.propertyId &&
+    typeof tenant.propertyId === "object" &&
+    tenant.propertyId._id
+  ) {
     tenant.propertyId = tenant.propertyId._id;
   }
   if (tenant.unitId && typeof tenant.unitId === "object" && tenant.unitId._id) {
     tenant.unitId = tenant.unitId._id;
   }
   if (tenant.tenantHistory?.length) {
-    tenant.tenantHistory = tenant.tenantHistory.map(h => ({
+    tenant.tenantHistory = tenant.tenantHistory.map((h) => ({
       ...h,
-      propertyId: h.propertyId && typeof h.propertyId === "object" && h.propertyId._id
-        ? h.propertyId._id
-        : h.propertyId || null,
+      propertyId:
+        h.propertyId && typeof h.propertyId === "object" && h.propertyId._id
+          ? h.propertyId._id
+          : h.propertyId || null,
     }));
   }
 
   // Case 1: Never assigned to any property
-  const hasValidHistory = tenant.tenantHistory?.some(h => h.propertyId);
+  const hasValidHistory = tenant.tenantHistory?.some((h) => h.propertyId);
   if (!tenant.propertyId && !hasValidHistory) {
-    return [{
-      status: "Unassigned",
-      due: 0,
-      overpaid: 0,
-      dueAmountDate: null,
-      totalPaid: 0,
-      totalExpectedRent: 0,
-      totalElectricityCost: 0,
-      propertyId: null
-    }];
+    return [
+      {
+        status: "Unassigned",
+        due: 0,
+        overpaid: 0,
+        dueAmountDate: null,
+        totalPaid: 0,
+        totalExpectedRent: 0,
+        totalElectricityCost: 0,
+        propertyId: null,
+      },
+    ];
   }
 
   // 🚫 Case 2: No starting date yet (assigned but not active)
   if (!tenant.startingDate) {
-    return [{
-      status: "Due",
-      due: 0,
-      overpaid: 0,
-      dueAmountDate: null,
-      totalPaid: 0,
-      totalExpectedRent: 0,
-      totalElectricityCost: 0,
-      propertyId: tenant.propertyId || null
-    }];
+    return [
+      {
+        status: "Due",
+        due: 0,
+        overpaid: 0,
+        dueAmountDate: null,
+        totalPaid: 0,
+        totalExpectedRent: 0,
+        totalElectricityCost: 0,
+        propertyId: tenant.propertyId || null,
+      },
+    ];
   }
 
   const start = new Date(tenant.startingDate);
-  const globalEnd = tenant.endingDate ? new Date(tenant.endingDate) : currentDate;
+  const globalEnd = tenant.endingDate
+    ? new Date(tenant.endingDate)
+    : currentDate;
 
   // 🔥 BUILD PERIODS FROM TENANT HISTORY
   let periods = [];
   const history = (tenant.tenantHistory || [])
-    .filter(h => h.propertyId) // Only valid property assignments
+    .filter((h) => h.propertyId) // Only valid property assignments
     .sort((a, b) => new Date(a.updatedAt) - new Date(b.updatedAt));
 
   if (history.length === 0) {
@@ -117,7 +135,7 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
     for (let i = 0; i < history.length; i++) {
       const h = history[i];
       const periodStart = new Date(h.updatedAt);
-      
+
       // Determine period end
       let periodEnd;
       if (i < history.length - 1) {
@@ -126,13 +144,16 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
       } else {
         // Last history entry
         // Check if tenant is still in this property or moved/unassigned
-        if (tenant.propertyId && tenant.propertyId.toString() === h.propertyId.toString()) {
+        if (
+          tenant.propertyId &&
+          tenant.propertyId.toString() === h.propertyId.toString()
+        ) {
           // Still in same property
           periodEnd = globalEnd;
         } else if (!tenant.propertyId) {
           // Tenant was unassigned - find unassignment date from history
-          const nextEntry = tenant.tenantHistory.find((entry, idx) => 
-            idx > i && !entry.propertyId
+          const nextEntry = tenant.tenantHistory.find(
+            (entry, idx) => idx > i && !entry.propertyId
           );
           periodEnd = nextEntry ? new Date(nextEntry.updatedAt) : globalEnd;
         } else {
@@ -150,10 +171,38 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
         });
       }
     }
+    // 🔄 Merge consecutive periods for the same property
+    if (periods.length > 1) {
+      const merged = [];
+      for (let i = 0; i < periods.length; i++) {
+        const last = merged[merged.length - 1];
+        const current = periods[i];
+
+        // If same property as last one, and starts right after or overlaps
+        if (
+          last &&
+          last.propertyId &&
+          current.propertyId &&
+          last.propertyId.toString() === current.propertyId.toString() &&
+          new Date(current.startDate) <= new Date(last.endDate)
+        ) {
+          // Extend last period’s end date
+          last.endDate = new Date(
+            Math.max(last.endDate.getTime(), current.endDate.getTime())
+          );
+        } else {
+          merged.push({ ...current });
+        }
+      }
+      periods = merged;
+    }
 
     // Add current property if different from last history
     const lastHistoryProperty = history[history.length - 1].propertyId;
-    if (tenant.propertyId && tenant.propertyId.toString() !== lastHistoryProperty.toString()) {
+    if (
+      tenant.propertyId &&
+      tenant.propertyId.toString() !== lastHistoryProperty.toString()
+    ) {
       const lastHistoryDate = new Date(history[history.length - 1].updatedAt);
       periods.push({
         propertyId: tenant.propertyId,
@@ -164,7 +213,7 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
   }
 
   // Initialize results
-  const results = periods.map(p => ({
+  const results = periods.map((p) => ({
     propertyId: p.propertyId,
     status: "Inactive",
     due: 0,
@@ -189,13 +238,26 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
     // Skip if period start is after current date
     if (periodStart > currentDate) continue;
 
-    let current = new Date(periodStart.getFullYear(), periodStart.getMonth(), 1);
+    let current = new Date(
+      periodStart.getFullYear(),
+      periodStart.getMonth(),
+      1
+    );
 
     while (current <= periodEnd && current <= currentDate) {
-      const monthRent = getRentForMonth(current.getFullYear(), current.getMonth(), rentChanges, tenant.monthlyRent);
+      const monthRent = getRentForMonth(
+        current.getFullYear(),
+        current.getMonth(),
+        rentChanges,
+        tenant.monthlyRent
+      );
 
       const monthStart = new Date(current);
-      const monthEnd = new Date(current.getFullYear(), current.getMonth() + 1, 0);
+      const monthEnd = new Date(
+        current.getFullYear(),
+        current.getMonth() + 1,
+        0
+      );
 
       // Determine the actual start and end dates for this month within the period
       const actualStart = monthStart < periodStart ? periodStart : monthStart;
@@ -209,15 +271,24 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
 
       // Calculate days occupied
       let daysOccupied;
-      if (actualStart.getMonth() === finalEnd.getMonth() && actualStart.getFullYear() === finalEnd.getFullYear()) {
+      if (
+        actualStart.getMonth() === finalEnd.getMonth() &&
+        actualStart.getFullYear() === finalEnd.getFullYear()
+      ) {
         // Same month - calculate days difference
         daysOccupied = endDay - startDay + 1;
       } else {
         // Full month or partial month at the end
-        if (current.getMonth() === periodStart.getMonth() && current.getFullYear() === periodStart.getFullYear()) {
+        if (
+          current.getMonth() === periodStart.getMonth() &&
+          current.getFullYear() === periodStart.getFullYear()
+        ) {
           // First month - from start date to end of month
           daysOccupied = daysInMonth - startDay + 1;
-        } else if (current.getMonth() === finalEnd.getMonth() && current.getFullYear() === finalEnd.getFullYear()) {
+        } else if (
+          current.getMonth() === finalEnd.getMonth() &&
+          current.getFullYear() === finalEnd.getFullYear()
+        ) {
           // Last month - from start of month to current date
           daysOccupied = endDay;
         } else {
@@ -258,24 +329,31 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
     tenant.currentUnit != null &&
     tenant.currentUnit >= tenant.startingUnit
   ) {
-    totalElectricityCost = (tenant.currentUnit - tenant.startingUnit) * tenant.electricityPerUnit;
+    totalElectricityCost =
+      (tenant.currentUnit - tenant.startingUnit) * tenant.electricityPerUnit;
   }
-  
+
   // Add electricity to current property period
   if (results.length > 0 && tenant.propertyId) {
-    const currentPropertyIndex = results.findIndex(r => 
-      r.propertyId && r.propertyId.toString() === tenant.propertyId.toString()
+    const currentPropertyIndex = results.findIndex(
+      (r) =>
+        r.propertyId && r.propertyId.toString() === tenant.propertyId.toString()
     );
     if (currentPropertyIndex !== -1) {
-      results[currentPropertyIndex].totalElectricityCost += totalElectricityCost;
+      results[currentPropertyIndex].totalElectricityCost +=
+        totalElectricityCost;
     }
   }
 
   // Distribute payments FIFO
-  let remainingPaid = (tenant.rentHistory || []).reduce((sum, rh) => sum + (rh.amount || 0), 0);
+  let remainingPaid = (tenant.rentHistory || []).reduce(
+    (sum, rh) => sum + (rh.amount || 0),
+    0
+  );
 
   for (const result of results) {
-    const totalExpected = result.totalExpectedRent + result.totalElectricityCost;
+    const totalExpected =
+      result.totalExpectedRent + result.totalElectricityCost;
 
     if (remainingPaid >= totalExpected) {
       result.totalPaid = totalExpected;
@@ -299,12 +377,17 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
 
   // Status per period
   for (const result of results) {
-    const isCurrentProperty = tenant.propertyId && 
-      result.propertyId && 
+    const isCurrentProperty =
+      tenant.propertyId &&
+      result.propertyId &&
       result.propertyId.toString() === tenant.propertyId.toString();
-    
+
     if (isCurrentProperty) {
-      result.status = tenant.endingDate ? "Inactive" : (result.due > 0 ? "Due" : "Active");
+      result.status = tenant.endingDate
+        ? "Inactive"
+        : result.due > 0
+        ? "Due"
+        : "Active";
     } else {
       result.status = "Inactive";
     }
@@ -319,7 +402,6 @@ function calculateTenantStatusAndDue(tenant, currentDate = new Date()) {
 
   return results;
 }
-
 
 export default async function routes(app) {
   app.addHook("preHandler", app.auth);
@@ -356,8 +438,10 @@ export default async function routes(app) {
       });
     } catch (err) {
       if (err.issues) {
-        const messages = err.issues.map(e => e.message);
-        return reply.code(400).send({ success: false, message: messages.join(", ") });
+        const messages = err.issues.map((e) => e.message);
+        return reply
+          .code(400)
+          .send({ success: false, message: messages.join(", ") });
       }
       return reply.code(400).send({ success: false, message: err.message });
     }
@@ -366,25 +450,25 @@ export default async function routes(app) {
   app.get("/", async (req, reply) => {
     try {
       const landlordId = req.user.sub;
-  
+
       // Parse query parameters for pagination
       const querySchema = z.object({
         page: z.string().regex(/^\d+$/).default("1").transform(Number),
-        limit: z.string().regex(/^\d+$/).default("10").transform(Number)
+        limit: z.string().regex(/^\d+$/).default("10").transform(Number),
       });
       const { page, limit } = querySchema.parse(req.query);
 
       const skip = (page - 1) * limit;
-  
+
       // Fetch properties with pagination
       const properties = await Property.find({ landlordId })
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit);
-  
+
       const totalProperties = await Property.countDocuments({ landlordId });
       const totalPages = Math.ceil(totalProperties / limit);
-  
+
       return reply.send({
         success: true,
         count: properties.length,
@@ -393,14 +477,14 @@ export default async function routes(app) {
           page,
           limit,
           totalPages,
-          totalItems: totalProperties
-        }
+          totalItems: totalProperties,
+        },
       });
     } catch (err) {
       return reply.code(500).send({
         success: false,
         message: "Failed to fetch properties",
-        error: err.message
+        error: err.message,
       });
     }
   });
@@ -409,7 +493,10 @@ export default async function routes(app) {
   app.get("/:id", async (req, reply) => {
     try {
       const landlordId = req.user.sub;
-      const property = await Property.findOne({ _id: req.params.id, landlordId });
+      const property = await Property.findOne({
+        _id: req.params.id,
+        landlordId,
+      });
       if (!property) {
         return reply.code(404).send({
           success: false,
@@ -451,7 +538,7 @@ export default async function routes(app) {
       });
     } catch (err) {
       if (err.issues) {
-        const messages = err.issues.map(e => e.message);
+        const messages = err.issues.map((e) => e.message);
         return reply.code(400).send({
           success: false,
           message: messages.join(", "),
@@ -469,11 +556,16 @@ export default async function routes(app) {
       const landlordId = req.user.sub;
       const propertyId = req.params.id;
       // Check if any occupied units
-      const occupiedCount = await Unit.countDocuments({ propertyId, landlordId, status: "occupied" });
+      const occupiedCount = await Unit.countDocuments({
+        propertyId,
+        landlordId,
+        status: "occupied",
+      });
       if (occupiedCount > 0) {
         return reply.code(400).send({
           success: false,
-          message: "Cannot delete property with occupied units. Evict all tenants first.",
+          message:
+            "Cannot delete property with occupied units. Evict all tenants first.",
         });
       }
       const property = await Property.findOneAndDelete({
@@ -508,19 +600,33 @@ export default async function routes(app) {
       const propertyId = req.params.id;
       const property = await Property.findOne({ _id: propertyId, landlordId });
       if (!property) {
-        return reply.code(404).send({ success: false, message: "Property not found" });
+        return reply
+          .code(404)
+          .send({ success: false, message: "Property not found" });
       }
-      const floors = await Floor.find({ propertyId, landlordId }).sort({ floorNumber: 1 });
-      const units = await Unit.find({ propertyId, landlordId }).sort({ floorId: 1, unitLabel: 1 });
-      const unitIds = units.map(u => u._id);
-      const tenants = await Tenant.find({ unitId: { $in: unitIds }, landlordId });
-      const tenantMap = Object.fromEntries(tenants.map(t => [t.unitId.toString(), t.toObject()]));
-      const floorData = floors.map(f => ({
+      const floors = await Floor.find({ propertyId, landlordId }).sort({
+        floorNumber: 1,
+      });
+      const units = await Unit.find({ propertyId, landlordId }).sort({
+        floorId: 1,
+        unitLabel: 1,
+      });
+      const unitIds = units.map((u) => u._id);
+      const tenants = await Tenant.find({
+        unitId: { $in: unitIds },
+        landlordId,
+      });
+      const tenantMap = Object.fromEntries(
+        tenants.map((t) => [t.unitId.toString(), t.toObject()])
+      );
+      const floorData = floors.map((f) => ({
         ...f.toObject(),
-        units: units.filter(u => u.floorId.toString() === f._id.toString()).map(u => ({
-          ...u.toObject(),
-          tenant: tenantMap[u._id.toString()] || null,
-        })),
+        units: units
+          .filter((u) => u.floorId.toString() === f._id.toString())
+          .map((u) => ({
+            ...u.toObject(),
+            tenant: tenantMap[u._id.toString()] || null,
+          })),
       }));
       return reply.send({ success: true, property, floors: floorData });
     } catch (err) {
@@ -532,14 +638,14 @@ export default async function routes(app) {
     try {
       const landlordId = req.user.sub;
       const currentDate = new Date();
-  
+
       // Parse query parameters
       const querySchema = z.object({
         page: z.string().regex(/^\d+$/).default("1").transform(Number),
-        limit: z.string().regex(/^\d+$/).default("10").transform(Number)
+        limit: z.string().regex(/^\d+$/).default("10").transform(Number),
       });
       const { page, limit } = querySchema.parse(req.query);
-  
+
       const skip = (page - 1) * limit;
       const properties = await Property.find({ landlordId })
         .select("_id name totalUnits totalVacant totalOccupied")
@@ -555,28 +661,39 @@ export default async function routes(app) {
             page,
             limit,
             totalPages: 0,
-            totalItems: 0
-          }
+            totalItems: 0,
+          },
         });
       }
 
       const totalProperties = await Property.countDocuments({ landlordId });
-      const propertyIds = properties.map(p => new mongoose.Types.ObjectId(p._id));
+      const propertyIds = properties.map(
+        (p) => new mongoose.Types.ObjectId(p._id)
+      );
 
       const tenants = await Tenant.find({
         landlordId: new mongoose.Types.ObjectId(landlordId),
         $or: [
           { propertyId: { $in: propertyIds } },
-          { "tenantHistory.propertyId": { $in: propertyIds } }
-        ]
-      }).select("propertyId unitId monthlyRent startingDate endingDate rentHistory electricityPerUnit startingUnit currentUnit rentChanges tenantHistory");
+          { "tenantHistory.propertyId": { $in: propertyIds } },
+        ],
+      }).select(
+        "propertyId unitId monthlyRent startingDate endingDate rentHistory electricityPerUnit startingUnit currentUnit rentChanges tenantHistory"
+      );
 
       // Tenant counts per property (current tenants only)
       const tenantCounts = await Tenant.aggregate([
-        { $match: { landlordId: new mongoose.Types.ObjectId(landlordId), propertyId: { $in: propertyIds } } },
-        { $group: { _id: "$propertyId", totalTenants: { $sum: 1 } } }
+        {
+          $match: {
+            landlordId: new mongoose.Types.ObjectId(landlordId),
+            propertyId: { $in: propertyIds },
+          },
+        },
+        { $group: { _id: "$propertyId", totalTenants: { $sum: 1 } } },
       ]);
-      const tenantCountMap = Object.fromEntries(tenantCounts.map(t => [t._id.toString(), t.totalTenants]));
+      const tenantCountMap = Object.fromEntries(
+        tenantCounts.map((t) => [t._id.toString(), t.totalTenants])
+      );
 
       // Per-property rent aggregation
       const rentMap = {};
@@ -586,7 +703,13 @@ export default async function routes(app) {
           if (!result.propertyId) continue;
           const propId = result.propertyId.toString();
           if (!rentMap[propId]) {
-            rentMap[propId] = { collected: 0, due: 0, overpaid: 0, expectedRent: 0, expectedElectricity: 0 };
+            rentMap[propId] = {
+              collected: 0,
+              due: 0,
+              overpaid: 0,
+              expectedRent: 0,
+              expectedElectricity: 0,
+            };
           }
           rentMap[propId].collected += result.totalPaid;
           rentMap[propId].due += result.due;
@@ -596,7 +719,7 @@ export default async function routes(app) {
         }
       }
 
-      const overviewData = properties.map(p => ({
+      const overviewData = properties.map((p) => ({
         propertyId: p._id,
         propertyName: p.name,
         totalUnits: p.totalUnits || 0,
@@ -607,7 +730,8 @@ export default async function routes(app) {
         totalDue: rentMap[p._id.toString()]?.due || 0,
         totalOverpaid: rentMap[p._id.toString()]?.overpaid || 0,
         totalExpectedRent: rentMap[p._id.toString()]?.expectedRent || 0,
-        totalExpectedElectricity: rentMap[p._id.toString()]?.expectedElectricity || 0
+        totalExpectedElectricity:
+          rentMap[p._id.toString()]?.expectedElectricity || 0,
       }));
 
       return reply.send({
@@ -617,13 +741,11 @@ export default async function routes(app) {
           page,
           limit,
           totalPages: Math.ceil(totalProperties / limit),
-          totalItems: totalProperties
-        }
+          totalItems: totalProperties,
+        },
       });
     } catch (err) {
       return reply.code(500).send({ success: false, message: err.message });
     }
   });
-  
-
 }
