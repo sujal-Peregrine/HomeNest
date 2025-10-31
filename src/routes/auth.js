@@ -71,7 +71,15 @@ export default async function routes(app) {
       });
 
       const token = app.jwt.sign({ sub: user._id.toString(), email: user.email });
-      return reply.code(201).send({ success: true, token });
+      return reply.code(201).send({
+        success: true,
+        token,
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+        }
+      });
     } catch (err) {
       if (err instanceof z.ZodError) return handleZodError(err, reply);
       return reply.code(500).send({ success: false, message: "Internal server error" });
@@ -100,7 +108,15 @@ export default async function routes(app) {
         });
       }
       const token = app.jwt.sign({ sub: user._id.toString(), email: user.email });
-      return reply.send({ success: true, token });
+      return reply.send({
+        success: true,
+        token,
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+        }
+      });
   
     } catch (err) {
       if (err instanceof z.ZodError) return handleZodError(err, reply);
