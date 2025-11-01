@@ -541,17 +541,17 @@ export default async function routes(app) {
         return reply
           .code(404)
           .send({ success: false, message: "Tenant not found" });
-
+  
       if ("currentUnit" in body) {
         delete body.currentUnit;
       }
-
+  
       const oldPropertyId = tenant.propertyId
         ? tenant.propertyId.toString()
         : null;
       let targetPropertyId = oldPropertyId;
       let property = null;
-
+  
       if (body.propertyId !== undefined) {
         if (body.propertyId === null) {
           targetPropertyId = null;
@@ -568,11 +568,11 @@ export default async function routes(app) {
           targetPropertyId = body.propertyId;
         }
       }
-
+  
       if (
         body.email ||
         (body.propertyId !== undefined && targetPropertyId !== oldPropertyId)
-      ) {
+) {
         const emailToCheck = body.email || tenant.email;
         if (emailToCheck) {
           let existingTenantWithEmail;
@@ -595,13 +595,13 @@ export default async function routes(app) {
             return reply
               .code(400)
               .send({
-                success: false,
-                message: `Email '${emailToCheck}' is already in use by another tenant`,
-              });
+              success: false,
+              message: `Email '${emailToCheck}' is already in use by another tenant`,
+            });
           }
         }
       }
-
+  
       if (
         body.phone ||
         (body.propertyId !== undefined && targetPropertyId !== oldPropertyId)
@@ -627,16 +627,16 @@ export default async function routes(app) {
           return reply
             .code(400)
             .send({
-              success: false,
-              message: `Phone number '${phoneToCheck}' is already in use by another tenant`,
-            });
+            success: false,
+            message: `Phone number '${phoneToCheck}' is already in use by another tenant`,
+          });
         }
       }
-
+  
       let oldUnitId = tenant.unitId ? tenant.unitId.toString() : null;
       let oldFloorId = null;
       let newFloorId = null;
-
+  
       if (body.unitId !== undefined) {
         if (body.unitId === null) {
           if (oldUnitId) {
@@ -660,10 +660,7 @@ export default async function routes(app) {
             // No change
           } else {
             if (oldUnitId) {
-              const oldUnit = await Unit.findOne({
-                _id: oldUnitId,
-                landlordId,
-              });
+              const oldUnit = await Unit.findOne({ _id: oldUnitId, landlordId });
               if (oldUnit) {
                 oldUnit.status = "vacant";
                 await oldUnit.save();
@@ -709,51 +706,75 @@ export default async function routes(app) {
         }
         body.unitId = null;
       }
-
+  
       if (body.startingUnit !== undefined && tenant.currentUnit === undefined) {
         tenant.currentUnit = body.startingUnit;
       }
-
+  
       const isUnassigning =
         (body.unitId === null || body.propertyId === null) &&
         (tenant.unitId || tenant.propertyId);
-
+  
+      // 🟢 Prevent updating startingDate once set
+      if (tenant.startingDate && body.startingDate) {
+        const existing = new Date(tenant.startingDate).getTime();
+        const incoming = new Date(body.startingDate).getTime();
+      
+        if (existing !== incoming) {
+          return reply.code(400).send({
+            success: false,
+            message: "Starting date cannot be updated once set",
+          });
+        }
+      }
+  
+      // 🟢 Detect if this is first time assigning property/unit
+      const wasUnassigned = !tenant.propertyId && !tenant.unitId;
+      const isNowAssigned = body.propertyId || body.unitId;
+  
+      // 🟢 If first assignment and startingDate not set
+      if (wasUnassigned && isNowAssigned && !tenant.startingDate && body.startingDate) {
+        tenant.startingDate = new Date(body.startingDate);
+      }
+  
       Object.assign(tenant, body);
       await tenant.save();
-
+  
       const propertyChanged = targetPropertyId !== oldPropertyId;
       const unitChanged =
         body.unitId !== undefined &&
         (body.unitId === null || body.unitId !== oldUnitId);
       const historyChanged = propertyChanged || unitChanged;
-
+  
       if (historyChanged) {
         const newPropertyId =
           body.propertyId !== undefined ? body.propertyId : tenant.propertyId;
         const newUnitId =
           body.unitId !== undefined ? body.unitId : tenant.unitId;
-
+  
+        const hasHistory = tenant.tenantHistory && tenant.tenantHistory.length > 0;
+  
         tenant.tenantHistory.push({
           propertyId: newPropertyId
             ? new mongoose.Types.ObjectId(newPropertyId)
             : null,
           unitId: newUnitId ? new mongoose.Types.ObjectId(newUnitId) : null,
-          updatedAt: isUnassigning
-            ? new Date()
-            : body.startingDate
-            ? new Date(body.startingDate)
+          updatedAt: hasHistory
+            ? new Date() // 🟢 Later changes use current time
+            : tenant.startingDate
+            ? new Date(tenant.startingDate) // 🟢 First assignment uses startingDate
             : new Date(),
         });
         await tenant.save();
       }
-
+  
       const populatedTenant = await Tenant.findOne({
         _id: req.params.id,
         landlordId,
       })
         .populate("propertyId", "name address")
         .populate("unitId");
-
+  
       if (oldFloorId && oldPropertyId) {
         await updateFloorCounts(oldPropertyId, oldFloorId, landlordId);
       }
@@ -768,7 +789,7 @@ export default async function routes(app) {
           await updatePropertyUnitCount(targetPropertyId, landlordId);
         }
       }
-
+  
       const dueDetails = calculateTenantStatusAndDue(populatedTenant);
       return reply.send({
         success: true,
