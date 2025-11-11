@@ -450,33 +450,118 @@ export default async function routes(app) {
   app.get("/", async (req, reply) => {
     try {
       const landlordId = req.user.sub;
-
-      // Parse query parameters for pagination
+      const currentDate = new Date();
+  
+      // Parse pagination query params
       const querySchema = z.object({
         page: z.string().regex(/^\d+$/).default("1").transform(Number),
         limit: z.string().regex(/^\d+$/).default("10").transform(Number),
       });
       const { page, limit } = querySchema.parse(req.query);
-
+  
       const skip = (page - 1) * limit;
-
-      // Fetch properties with pagination
+  
+      // Fetch paginated properties
       const properties = await Property.find({ landlordId })
         .sort({ createdAt: -1 })
         .skip(skip)
-        .limit(limit);
-
+        .limit(limit)
+        .select("_id name address totalUnits totalVacant totalOccupied createdAt");
+  
       const totalProperties = await Property.countDocuments({ landlordId });
-      const totalPages = Math.ceil(totalProperties / limit);
-
+      if (!properties.length) {
+        return reply.send({
+          success: true,
+          data: [],
+          pagination: {
+            page,
+            limit,
+            totalPages: 0,
+            totalItems: 0,
+          },
+        });
+      }
+  
+      // Collect property IDs
+      const propertyIds = properties.map(
+        (p) => new mongoose.Types.ObjectId(p._id)
+      );
+  
+      // Fetch related tenants
+      const tenants = await Tenant.find({
+        landlordId: new mongoose.Types.ObjectId(landlordId),
+        $or: [
+          { propertyId: { $in: propertyIds } },
+          { "tenantHistory.propertyId": { $in: propertyIds } },
+        ],
+      }).select(
+        "propertyId unitId monthlyRent startingDate endingDate rentHistory electricityPerUnit startingUnit currentUnit rentChanges tenantHistory"
+      );
+  
+      // Tenant counts
+      const tenantCounts = await Tenant.aggregate([
+        {
+          $match: {
+            landlordId: new mongoose.Types.ObjectId(landlordId),
+            propertyId: { $in: propertyIds },
+          },
+        },
+        { $group: { _id: "$propertyId", totalTenants: { $sum: 1 } } },
+      ]);
+      const tenantCountMap = Object.fromEntries(
+        tenantCounts.map((t) => [t._id.toString(), t.totalTenants])
+      );
+  
+      // Rent aggregation per property
+      const rentMap = {};
+      for (const tenant of tenants) {
+        const results = calculateTenantStatusAndDue(tenant, currentDate);
+        for (const result of results) {
+          if (!result.propertyId) continue;
+          const propId = result.propertyId.toString();
+          if (!rentMap[propId]) {
+            rentMap[propId] = {
+              collected: 0,
+              due: 0,
+              overpaid: 0,
+              expectedRent: 0,
+              expectedElectricity: 0,
+            };
+          }
+          rentMap[propId].collected += result.totalPaid;
+          rentMap[propId].due += result.due;
+          rentMap[propId].overpaid += result.overpaid;
+          rentMap[propId].expectedRent += result.totalExpectedRent;
+          rentMap[propId].expectedElectricity += result.totalElectricityCost;
+        }
+      }
+  
+      // Combine property + overview data
+      const overviewData = properties.map((p) => ({
+        propertyId: p._id,
+        propertyName: p.name,
+        address: p.address,
+        totalUnits: p.totalUnits || 0,
+        totalVacant: p.totalVacant || 0,
+        totalOccupied: p.totalOccupied || 0,
+        totalTenants: tenantCountMap[p._id.toString()] || 0,
+        totalRentCollected: rentMap[p._id.toString()]?.collected || 0,
+        totalDue: rentMap[p._id.toString()]?.due || 0,
+        totalOverpaid: rentMap[p._id.toString()]?.overpaid || 0,
+        totalExpectedRent: rentMap[p._id.toString()]?.expectedRent || 0,
+        totalExpectedElectricity:
+          rentMap[p._id.toString()]?.expectedElectricity || 0,
+      }));
+  
+      // Return final response
       return reply.send({
         success: true,
-        count: properties.length,
-        data: properties,
+        count: overviewData.length,
+        data: overviewData,
         pagination: {
           page,
           limit,
-          totalPages,
+          totalPages: Math.ceil(totalProperties / limit),
           totalItems: totalProperties,
         },
       });
@@ -598,6 +683,9 @@ export default async function routes(app) {
     try {
       const landlordId = req.user.sub;
       const propertyId = req.params.id;
+      const currentDate = new Date();
+  
+      // Step 1: Fetch the property
       const property = await Property.findOne({ _id: propertyId, landlordId });
       if (!property) {
         return reply
@@ -613,12 +701,23 @@ export default async function routes(app) {
       });
       const unitIds = units.map((u) => u._id);
       const tenants = await Tenant.find({
-        unitId: { $in: unitIds },
         landlordId,
-      });
-      const tenantMap = Object.fromEntries(
-        tenants.map((t) => [t.unitId.toString(), t.toObject()])
+        $or: [
+          { propertyId: new mongoose.Types.ObjectId(propertyId) },
+          { "tenantHistory.propertyId": new mongoose.Types.ObjectId(propertyId) },
+        ],
+      }).select(
+        "propertyId unitId monthlyRent startingDate endingDate rentHistory electricityPerUnit startingUnit currentUnit rentChanges tenantHistory"
       );
+  
+      // Step 4: Create tenant map for unit display
+      const tenantMap = Object.fromEntries(
+        tenants
+          .filter((t) => t.unitId)
+          .map((t) => [t.unitId.toString(), t.toObject()])
+      );
+  
+      // Step 5: Construct floor + unit structure
       const floorData = floors.map((f) => ({
         ...f.toObject(),
         units: units
@@ -628,9 +727,55 @@ export default async function routes(app) {
             tenant: tenantMap[u._id.toString()] || null,
           })),
       }));
-      return reply.send({ success: true, property, floors: floorData });
+  
+      // Step 6: Compute overview (same logic as /overview)
+      const rentMap = {
+        collected: 0,
+        due: 0,
+        overpaid: 0,
+        expectedRent: 0,
+        expectedElectricity: 0,
+      };
+  
+      for (const tenant of tenants) {
+        const results = calculateTenantStatusAndDue(tenant, currentDate);
+        for (const result of results) {
+          rentMap.collected += result.totalPaid;
+          rentMap.due += result.due;
+          rentMap.overpaid += result.overpaid;
+          rentMap.expectedRent += result.totalExpectedRent;
+          rentMap.expectedElectricity += result.totalElectricityCost;
+        }
+      }
+  
+      const totalTenants = tenants.length;
+  
+      const overview = {
+        propertyId: property._id,
+        propertyName: property.name,
+        totalUnits: property.totalUnits || 0,
+        totalVacant: property.totalVacant || 0,
+        totalOccupied: property.totalOccupied || 0,
+        totalTenants,
+        totalRentCollected: rentMap.collected,
+        totalDue: rentMap.due,
+        totalOverpaid: rentMap.overpaid,
+        totalExpectedRent: rentMap.expectedRent,
+        totalExpectedElectricity: rentMap.expectedElectricity,
+      };
+  
+      // Step 7: Return response
+      return reply.send({
+        success: true,
+        property,
+        overview,
+        floors: floorData,
+      });
     } catch (err) {
-      return reply.code(500).send({ success: false, message: err.message });
+      return reply.code(500).send({
+        success: false,
+        message: err.message,
+      });
     }
   });
 
