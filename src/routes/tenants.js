@@ -1412,4 +1412,163 @@ export default async function routes(app) {
     }
   });
 
+  //History
+
+  // ✅ Get Complete Tenant History
+// Endpoint: GET /tenants/history/:id
+app.get("/history/:id", async (req, reply) => {
+  try {
+    const landlordId = req.user.sub;
+
+    // Fetch tenant with current property and unit populated
+    const tenant = await Tenant.findOne({ _id: req.params.id, landlordId })
+      .populate("propertyId", "name address")
+      .populate("unitId");
+
+    if (!tenant) {
+      return reply
+        .code(404)
+        .send({ success: false, message: "Tenant not found" });
+    }
+
+    // Process tenant history to populate property, unit, and floor details
+    const enrichedTenantHistory = await Promise.all(
+      (tenant.tenantHistory || []).map(async (historyEntry) => {
+        const entry = {
+          updatedAt: historyEntry.updatedAt,
+          property: null,
+          unit: null,
+          floor: null,
+        };
+
+        // Populate property details
+        if (historyEntry.propertyId) {
+          const property = await Property.findOne({
+            _id: historyEntry.propertyId,
+            landlordId,
+          }).select("name address");
+          entry.property = property
+            ? {
+                id: property._id,
+                name: property.name,
+                address: property.address,
+              }
+            : null;
+        }
+
+        // Populate unit and floor details
+        if (historyEntry.unitId) {
+          const unit = await Unit.findOne({
+            _id: historyEntry.unitId,
+            landlordId,
+          });
+          if (unit) {
+            entry.unit = {
+              id: unit._id,
+              name: unit.unitLabel,
+              status: unit.status,
+            };
+
+            // Populate floor details
+            if (unit.floorId) {
+              const floor = await Floor.findOne({
+                _id: unit.floorId,
+                landlordId,
+              }).select("name floorNumber");
+              entry.floor = floor
+                ? {
+                    id: floor._id,
+                    name: floor.name,
+                    floorNumber: floor.floorNumber,
+                  }
+                : null;
+            }
+          }
+        }
+
+        return entry;
+      })
+    );
+
+    // Sort rent changes by effective date
+    const sortedRentChanges = (tenant.rentChanges || [])
+      .map((rc) => ({
+        amount: rc.amount,
+        effectiveFrom: rc.effectiveFrom,
+      }))
+      .sort((a, b) => new Date(a.effectiveFrom) - new Date(b.effectiveFrom));
+
+    // Sort rent history by payment date (most recent first)
+    const sortedRentHistory = (tenant.rentHistory || [])
+      .map((rh) => ({
+        amount: rh.amount,
+        paidAt: rh.paidAt,
+        status: rh.status,
+        rentType: rh.rentType || "flat_rent",
+        previousUnit: rh.previousUnit,
+        currentUnit: rh.currentUnit,
+      }))
+      .sort((a, b) => new Date(b.paidAt) - new Date(a.paidAt));
+
+    // Calculate rent overview
+    const rentOverview = calculateTenantStatusAndDue(tenant);
+
+    return reply.send({
+      success: true,
+      tenant: {
+        id: tenant._id,
+        name: tenant.name,
+        phone: tenant.phone,
+        email: tenant.email,
+        photoUrl: tenant.photoUrl,
+        startingDate: tenant.startingDate,
+        endingDate: tenant.endingDate,
+        monthlyRent: tenant.monthlyRent,
+        depositMoney: tenant.depositMoney,
+        electricityPerUnit: tenant.electricityPerUnit,
+        startingUnit: tenant.startingUnit,
+        currentUnit: tenant.currentUnit,
+        currentProperty: tenant.propertyId,
+        currentPropertyUnit: tenant.unitId,
+      },
+      history: {
+        tenantHistory: enrichedTenantHistory,
+        rentHistory: sortedRentHistory,
+        rentChanges: sortedRentChanges,
+      },
+      rentOverview: {
+        status: rentOverview.status,
+        totalDue: rentOverview.due,
+        totalOverpaid: rentOverview.overpaid,
+        dueAmountDate: rentOverview.dueAmountDate,
+        flatRent: {
+          totalExpected: rentOverview.totalExpectedRent,
+          totalPaid: rentOverview.totalRentPaid,
+          due: rentOverview.rentDue,
+          overpaid: rentOverview.rentOverpaid,
+        },
+        electricity: {
+          totalExpected: rentOverview.totalElectricityCost,
+          totalPaid: rentOverview.totalElectricityPaid,
+          due: rentOverview.electricityDue,
+          overpaid: rentOverview.electricityOverpaid,
+          startingUnit: tenant.startingUnit,
+          currentUnit: tenant.currentUnit,
+          perUnitCost: tenant.electricityPerUnit,
+          unitsConsumed:
+            tenant.startingUnit != null && tenant.currentUnit != null
+              ? tenant.currentUnit - tenant.startingUnit
+              : 0,
+        },
+      },
+    });
+  } catch (err) {
+    return reply.code(500).send({
+      success: false,
+      message: "Failed to fetch tenant history",
+      error: err.message,
+    });
+  }
+});
+
 }
