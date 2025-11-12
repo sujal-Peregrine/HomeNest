@@ -71,10 +71,12 @@ function getRentForMonth(year, month, rentChanges, defaultRent) {
   if (!rentChanges || rentChanges.length === 0) {
     return defaultRent || 0;
   }
-  let applicableRent = rentChanges[0].amount;
+  const monthStart = new Date(year, month, 1);
+  const monthEnd   = new Date(year, month + 1, 0);
+  let applicableRent = defaultRent !== undefined ? defaultRent : rentChanges[0].amount;
   for (const change of rentChanges) {
     const effective = new Date(change.effectiveFrom);
-    if (effective <= new Date(year, month, 1)) {
+    if (effective <= monthEnd) {
       applicableRent = change.amount;
     } else {
       break;

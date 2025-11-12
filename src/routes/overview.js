@@ -5,15 +5,15 @@ import mongoose from "mongoose";
 
 // Function to get applicable rent for a specific month
 function getRentForMonth(year, month, rentChanges, defaultRent) {
-  // If no rent changes, use default rent
   if (!rentChanges || rentChanges.length === 0) {
     return defaultRent || 0;
   }
-  // Rent changes must be sorted by effectiveFrom ASC
-  let applicableRent = rentChanges[0].amount;
+  const monthStart = new Date(year, month, 1);
+  const monthEnd   = new Date(year, month + 1, 0);
+  let applicableRent = defaultRent !== undefined ? defaultRent : rentChanges[0].amount;
   for (const change of rentChanges) {
     const effective = new Date(change.effectiveFrom);
-    if (effective <= new Date(year, month, 1)) {
+    if (effective <= monthEnd) {
       applicableRent = change.amount;
     } else {
       break;
