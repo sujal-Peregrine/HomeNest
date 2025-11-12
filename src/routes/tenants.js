@@ -1434,15 +1434,20 @@ app.get("/history/:id", async (req, reply) => {
     }
 
     // Process tenant history to populate property, unit, and floor details
+    const tenantHistoryArray = tenant.tenantHistory || [];
     const enrichedTenantHistory = await Promise.all(
-      (tenant.tenantHistory || []).map(async (historyEntry) => {
+      tenantHistoryArray.map(async (historyEntry, index) => {
+        // Get the next history entry (for endDate)
+        const nextEntry = tenantHistoryArray[index + 1];
+    
         const entry = {
-          updatedAt: historyEntry.updatedAt,
+          startDate: historyEntry.updatedAt,
+          endDate: nextEntry ? nextEntry.updatedAt : null, // <-- ✅ Added this line
           property: null,
           unit: null,
           floor: null,
         };
-
+    
         // Populate property details
         if (historyEntry.propertyId) {
           const property = await Property.findOne({
@@ -1457,7 +1462,7 @@ app.get("/history/:id", async (req, reply) => {
               }
             : null;
         }
-
+    
         // Populate unit and floor details
         if (historyEntry.unitId) {
           const unit = await Unit.findOne({
@@ -1470,7 +1475,7 @@ app.get("/history/:id", async (req, reply) => {
               name: unit.unitLabel,
               status: unit.status,
             };
-
+    
             // Populate floor details
             if (unit.floorId) {
               const floor = await Floor.findOne({
@@ -1487,10 +1492,11 @@ app.get("/history/:id", async (req, reply) => {
             }
           }
         }
-
+    
         return entry;
       })
     );
+
 
     // Sort rent changes by effective date
     const sortedRentChanges = (tenant.rentChanges || [])

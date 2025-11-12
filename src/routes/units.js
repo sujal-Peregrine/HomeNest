@@ -25,6 +25,25 @@ const updateRentSchema = z.object({
   amount: z.number().nonnegative()
 });
 
+// Function to get applicable rent for a specific month
+function getRentForMonth(year, month, rentChanges, defaultRent) {
+  if (!rentChanges || rentChanges.length === 0) {
+    return defaultRent || 0;
+  }
+  const monthStart = new Date(year, month, 1);
+  const monthEnd   = new Date(year, month + 1, 0);
+  let applicableRent = defaultRent !== undefined ? defaultRent : rentChanges[0].amount;
+  for (const change of rentChanges) {
+    const effective = new Date(change.effectiveFrom);
+    if (effective <= monthEnd) {
+      applicableRent = change.amount;
+    } else {
+      break;
+    }
+  }
+  return applicableRent;
+}
+
 async function updateFloorCounts(propertyId, floorId, landlordId) {
   const agg = await Unit.aggregate([
     { $match: { propertyId: new mongoose.Types.ObjectId(propertyId), floorId: new mongoose.Types.ObjectId(floorId), landlordId: new mongoose.Types.ObjectId(landlordId) } },
@@ -275,4 +294,277 @@ app.post("/", async (req, reply) => {
       });
     }
   });
+
+  //UNIT HISTORY
+// ✅ Get Unit History with All Tenants
+app.get("/unit-history/:unitId", async (req, reply) => {
+  try {
+    const landlordId = req.user.sub;
+    const { unitId } = req.params;
+
+    // Verify unit exists and belongs to landlord
+    const unit = await Unit.findOne({ _id: unitId, landlordId })
+      .populate("propertyId", "name address")
+      .populate("floorId", "name floorNumber");
+
+    if (!unit) {
+      return reply
+        .code(404)
+        .send({ success: false, message: "Unit not found" });
+    }
+
+    // Find all tenants who have this unit in their history
+    const tenants = await Tenant.find({
+      landlordId,
+      "tenantHistory.unitId": new mongoose.Types.ObjectId(unitId),
+    }).sort({ createdAt: 1 });
+
+    // Process each tenant's stay in this unit
+    const unitTenantHistory = [];
+
+    for (const tenant of tenants) {
+      // Find all instances where this tenant was in this unit
+      const unitStays = [];
+      
+      for (let i = 0; i < tenant.tenantHistory.length; i++) {
+        const history = tenant.tenantHistory[i];
+        
+        if (history.unitId?.toString() === unitId) {
+          // Determine start date
+          // If this is the first history entry, use tenant's startingDate (if available)
+          // Otherwise use the history entry's updatedAt
+          let startDate;
+          if (i === 0 && tenant.startingDate) {
+            startDate = new Date(tenant.startingDate);
+          } else {
+            startDate = history.updatedAt;
+          }
+
+          // Find when they left this unit
+          let endDate = null;
+          let leftUnit = false;
+          let exitReason = null; // "unassigned", "transferred", "left_property"
+
+          // Check if there's a next entry
+          if (i < tenant.tenantHistory.length - 1) {
+            const nextHistory = tenant.tenantHistory[i + 1];
+            
+            // Case 1: Unassigned (both propertyId and unitId are null)
+            if (!nextHistory.propertyId && !nextHistory.unitId) {
+              endDate = nextHistory.updatedAt;
+              leftUnit = true;
+              exitReason = "unassigned";
+            }
+            // Case 2: Transferred to different unit (propertyId or unitId changed)
+            else if (nextHistory.unitId?.toString() !== unitId) {
+              endDate = nextHistory.updatedAt;
+              leftUnit = true;
+              exitReason = "transferred";
+            }
+          }
+
+          // If no end date found from history but tenant has endingDate, use that
+          if (!endDate && tenant.endingDate) {
+            endDate = new Date(tenant.endingDate);
+            leftUnit = true;
+            exitReason = "left_property";
+          }
+
+          // If still no end date and tenant is not currently in this unit
+          if (!endDate && tenant.unitId?.toString() !== unitId) {
+            leftUnit = true;
+            exitReason = "unknown";
+          }
+
+          const effectiveEndDate = endDate || new Date();
+
+          // Calculate rent to be collected for this period
+          let totalExpectedRent = 0;
+          const rentChanges = (tenant.rentChanges || []).sort(
+            (a, b) => new Date(a.effectiveFrom) - new Date(b.effectiveFrom)
+          );
+
+          let current = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
+
+          while (current <= effectiveEndDate) {
+            const monthRent = getRentForMonth(
+              current.getFullYear(),
+              current.getMonth(),
+              rentChanges,
+              tenant.monthlyRent
+            );
+
+            const monthStart = new Date(current);
+            const monthEnd = new Date(current.getFullYear(), current.getMonth() + 1, 0);
+
+            const actualStart = monthStart < startDate ? startDate : monthStart;
+            const actualEnd = monthEnd > effectiveEndDate ? effectiveEndDate : monthEnd;
+
+            const daysInMonth = monthEnd.getDate();
+            const startDay = actualStart.getDate();
+            const endDay = actualEnd.getDate();
+
+            let daysOccupied;
+            if (
+              actualStart.getMonth() === actualEnd.getMonth() &&
+              actualStart.getFullYear() === actualEnd.getFullYear()
+            ) {
+              daysOccupied = endDay - startDay + 1;
+            } else {
+              if (
+                current.getMonth() === startDate.getMonth() &&
+                current.getFullYear() === startDate.getFullYear()
+              ) {
+                daysOccupied = daysInMonth - startDay + 1;
+              } else if (
+                current.getMonth() === actualEnd.getMonth() &&
+                current.getFullYear() === actualEnd.getFullYear()
+              ) {
+                daysOccupied = endDay;
+              } else {
+                daysOccupied = daysInMonth;
+              }
+            }
+
+            let rentForThisPeriod = 0;
+            if (daysOccupied >= daysInMonth) {
+              rentForThisPeriod = monthRent;
+            } else if (daysOccupied >= 16) {
+              rentForThisPeriod = monthRent;
+            } else if (daysOccupied >= 1) {
+              rentForThisPeriod = monthRent / 2;
+            }
+
+            totalExpectedRent += rentForThisPeriod;
+            current.setMonth(current.getMonth() + 1);
+          }
+
+          // Calculate total rent paid during this stay (only flat_rent)
+          const rentPaymentsDuringStay = (tenant.rentHistory || [])
+            .filter((rh) => {
+              const paidDate = new Date(rh.paidAt);
+              return (
+                (rh.rentType === "flat_rent" || !rh.rentType) &&
+                paidDate >= startDate &&
+                paidDate <= effectiveEndDate
+              );
+            });
+
+          const totalRentPaid = rentPaymentsDuringStay.reduce(
+            (sum, rh) => sum + (rh.amount || 0),
+            0
+          );
+
+          // Calculate due/overpaid
+          const balance = totalExpectedRent - totalRentPaid;
+          const due = balance > 0 ? balance : 0;
+          const overpaid = balance < 0 ? Math.abs(balance) : 0;
+
+          // Get rent changes applicable during this stay
+          const applicableRentChanges = rentChanges.filter((rc) => {
+            const changeDate = new Date(rc.effectiveFrom);
+            return changeDate >= startDate && changeDate <= effectiveEndDate;
+          });
+
+          unitStays.push({
+            startDate: startDate,
+            endDate: endDate,
+            isCurrentlyOccupied: !leftUnit && tenant.unitId?.toString() === unitId,
+            exitReason: exitReason,
+            durationInDays: endDate 
+              ? Math.ceil((new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24))
+              : Math.ceil((new Date() - new Date(startDate)) / (1000 * 60 * 60 * 24)),
+            rent: {
+              initialMonthlyRent: tenant.monthlyRent,
+              totalExpected: totalExpectedRent,
+              totalPaid: totalRentPaid,
+              due: due,
+              overpaid: overpaid,
+              rentChanges: applicableRentChanges.map((rc) => ({
+                amount: rc.amount,
+                effectiveFrom: rc.effectiveFrom,
+              })),
+            },
+            rentHistory: rentPaymentsDuringStay.map((rh) => ({
+              amount: rh.amount,
+              paidAt: rh.paidAt,
+              status: rh.status,
+              rentType: rh.rentType || "flat_rent",
+            })),
+            tenant: {
+              id: tenant._id,
+              name: tenant.name,
+              phone: tenant.phone,
+              email: tenant.email,
+              photoUrl: tenant.photoUrl,
+              depositMoney: tenant.depositMoney,
+            },
+          });
+        }
+      }
+
+      if (unitStays.length > 0) {
+        unitTenantHistory.push(...unitStays);
+      }
+    }
+
+    // Sort by start date (oldest first)
+    unitTenantHistory.sort((a, b) => new Date(a.startDate) - new Date(b.startDate));
+
+    // Calculate total statistics for the unit
+    const totalExpectedFromUnit = unitTenantHistory.reduce(
+      (sum, stay) => sum + stay.rent.totalExpected,
+      0
+    );
+    const totalCollectedFromUnit = unitTenantHistory.reduce(
+      (sum, stay) => sum + stay.rent.totalPaid,
+      0
+    );
+    const totalDueFromUnit = unitTenantHistory.reduce(
+      (sum, stay) => sum + stay.rent.due,
+      0
+    );
+    const totalOverpaidFromUnit = unitTenantHistory.reduce(
+      (sum, stay) => sum + stay.rent.overpaid,
+      0
+    );
+
+    return reply.send({
+      success: true,
+      unit: {
+        id: unit._id,
+        name: unit.name,
+        status: unit.status,
+        property: unit.propertyId
+          ? {
+              id: unit.propertyId._id,
+              name: unit.propertyId.name,
+              address: unit.propertyId.address,
+            }
+          : null,
+        floor: unit.floorId
+          ? {
+              id: unit.floorId._id,
+              name: unit.floorId.name,
+              floorNumber: unit.floorId.floorNumber,
+            }
+          : null,
+      },
+      statistics: {
+        totalTenants: unitTenantHistory.length,
+        totalExpectedRent: totalExpectedFromUnit,
+        totalCollectedRent: totalCollectedFromUnit,
+        totalDue: totalDueFromUnit,
+        totalOverpaid: totalOverpaidFromUnit,
+      },
+      tenantHistory: unitTenantHistory,
+    });
+  } catch (err) {
+    return reply.code(500).send({
+      success: false,
+      message: "Failed to fetch unit history",
+      error: err.message,
+    });
+  }
+});
 }
