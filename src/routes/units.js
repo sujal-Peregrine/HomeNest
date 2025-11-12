@@ -303,15 +303,15 @@ app.get("/unit-history/:unitId", async (req, reply) => {
     const { unitId } = req.params;
 
     // Verify unit exists and belongs to landlord
-    const unit = await Unit.findOne({ _id: unitId, landlordId })
-      .populate("propertyId", "name address")
-      .populate("floorId", "name floorNumber");
-
+    const unit = await Unit.findOne({ _id: unitId, landlordId });
     if (!unit) {
-      return reply
-        .code(404)
-        .send({ success: false, message: "Unit not found" });
+      return reply.code(404).send({ success: false, message: "Unit not found" });
     }
+
+    // 2️⃣ Fetch related floor
+    const floor = await Floor.findById(unit.floorId).select("name floorNumber");
+    // 3️⃣ Fetch related property
+    const property = await Property.findById(unit.propertyId).select("name address");
 
     // Find all tenants who have this unit in their history
     const tenants = await Tenant.find({
@@ -533,22 +533,18 @@ app.get("/unit-history/:unitId", async (req, reply) => {
       success: true,
       unit: {
         id: unit._id,
-        name: unit.name,
+        unitLabel: unit.unitLabel,
         status: unit.status,
-        property: unit.propertyId
-          ? {
-              id: unit.propertyId._id,
-              name: unit.propertyId.name,
-              address: unit.propertyId.address,
-            }
-          : null,
-        floor: unit.floorId
-          ? {
-              id: unit.floorId._id,
-              name: unit.floorId.name,
-              floorNumber: unit.floorId.floorNumber,
-            }
-          : null,
+        property: {
+          id: property?._id,
+          name: property?.name || "",
+          address: property?.address || {},
+        },
+        floor: {
+          id: floor?._id,
+          name: floor?.name || "",
+          floorNumber: floor?.floorNumber ?? null,
+        },
       },
       statistics: {
         totalTenants: unitTenantHistory.length,
